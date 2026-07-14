@@ -33,10 +33,6 @@ const firebaseConfig = {
 const CLOUDINARY_CLOUD_NAME = "dvdshonhc";
 const CLOUDINARY_UPLOAD_PRESET = "adroooomie";
 const ONESIGNAL_APP_ID = "YOUR_ONESIGNAL_APP_ID";
-// Your own Firebase Auth UID (Authentication → Users). Must also exist as a doc
-// in the "admins" Firestore collection — that's what the security rules check.
-// This constant is just for client-side display (relabeling your messages).
-const ADMIN_UID = "YOUR_FIREBASE_AUTH_UID";
 // ---------------------------------------------------------
 
 const CATEGORY_OPTIONS = ["Restaurant / Cafe","Bakery","Fitness / Health","Retail","Electronics/Gadgets","Homeware","Education","Beauty & Wellness","Services","Other"];
@@ -53,7 +49,7 @@ const topbarEl = document.getElementById("topbar");
 const navEl = document.getElementById("bottomNav");
 const toastEl = document.getElementById("toast");
 
-const state = { user: null, business: null, unsub: [], _scrollHandler: null, isAdmin: false };
+const state = { user: null, business: null, unsub: [], _scrollHandler: null };
 
 // YouTube-style: hide the topbar on scroll-down, reveal it on scroll-up. Only
 // wired while inside a room (see renderRoomHub) — everywhere else the topbar
@@ -143,14 +139,6 @@ async function notifyPartner(playerId, message, title, url) {
       body: JSON.stringify({ playerId, message, title, url }),
     });
   } catch (e) { console.warn("Notification failed:", e); }
-}
-
-// Pings you directly whenever a business requests support — you go through the
-// same profile/OneSignal setup as everyone else, so this just reuses that.
-async function notifyAdmin(message, title, url) {
-  if (!ADMIN_UID || ADMIN_UID === "YOUR_FIREBASE_AUTH_UID") return; // not configured yet
-  const admin = await loadBusiness(ADMIN_UID);
-  notifyPartner(admin?.oneSignalPlayerId, message, title, url);
 }
 
 // Simple rule-based match score (no AI) — approximates the blueprint's weights:
@@ -425,10 +413,8 @@ function renderProfile() {
     </div>
     <p class="error-text" id="errorText"></p>
     <button class="btn btn-primary" id="saveBtn"><i class="fa-solid fa-check"></i> Save & Continue</button>
-    ${state.isAdmin ? `<button class="btn btn-secondary" id="adminBtn" style="width:100%;margin-top:10px;"><i class="fa-solid fa-gauge"></i> Admin Dashboard</button>` : ""}
     ${state.business ? `<button class="btn btn-danger-link" id="logoutBtn" style="width:100%;margin-top:10px;"><i class="fa-solid fa-arrow-right-from-bracket"></i> Log out</button>` : ""}
   `;
-  if (state.isAdmin) document.getElementById("adminBtn").onclick = () => go("#/admin");
   document.querySelectorAll(".platform-chip").forEach((chip) => {
     chip.onclick = () => { const p = chip.dataset.p; selectedPlatforms.has(p) ? selectedPlatforms.delete(p) : selectedPlatforms.add(p); chip.classList.toggle("selected"); };
   });
@@ -862,15 +848,11 @@ function renderChatTab(container, room) {
     const scroll = document.getElementById("chatScroll");
     if (!scroll) return;
     const msgs = snap.docs.map((d) => d.data());
-    scroll.innerHTML = msgs.length ? msgs.map((m) => {
-      const isAdminMsg = m.senderId === ADMIN_UID;
-      return `
+    scroll.innerHTML = msgs.length ? msgs.map((m) => `
       <div class="msg-row ${m.senderId === state.user.uid ? "mine" : "theirs"}">
-        ${isAdminMsg ? `<div class="admin-tag"><i class="fa-solid fa-shield-halved"></i> adRoomie Support</div>` : ""}
-        <div class="bubble ${isAdminMsg ? "admin-bubble" : ""}">${m.imageUrl ? `<img src="${m.imageUrl}">` : ""}${m.text ? esc(m.text) : ""}</div>
+        <div class="bubble">${m.imageUrl ? `<img src="${m.imageUrl}">` : ""}${m.text ? esc(m.text) : ""}</div>
         <div class="msg-time">${formatTime(m.createdAt)}</div>
-      </div>`;
-    }).join("") : `<div class="empty-state"><i class="fa-solid fa-comment-dots big-icon"></i>No messages yet — say hello!</div>`;
+      </div>`).join("") : `<div class="empty-state"><i class="fa-solid fa-comment-dots big-icon"></i>No messages yet — say hello!</div>`;
     scroll.scrollTop = scroll.scrollHeight;
   });
   state.unsub.push(unsub);
@@ -1013,19 +995,16 @@ function renderSupportTab(container, room) {
   `;
   document.getElementById("modBtn").onclick = async () => {
     await addDoc(collection(db, "rooms", room.id, "supportRequests"), { type: "moderator", requestedBy: state.user.uid, createdAt: serverTimestamp() });
-    notifyAdmin(`${state.business.name} requested a moderator in "${room.goal}"`, "Moderator requested", `${location.origin}/#/room/${room.id}/chat`);
     toast("Request sent — we'll join the chat shortly.");
   };
   document.getElementById("checkinBtn").onclick = async () => {
     await addDoc(collection(db, "rooms", room.id, "supportRequests"), { type: "checkin", requestedBy: state.user.uid, createdAt: serverTimestamp() });
-    notifyAdmin(`${state.business.name} requested a check-in on "${room.goal}"`, "Check-in requested", `${location.origin}/#/room/${room.id}/chat`);
     toast("Check-in requested!");
   };
   document.getElementById("reportBtn").onclick = async () => {
     const note = prompt("What's going wrong? (this goes straight to the adRoomie team)");
     if (note === null) return;
     await addDoc(collection(db, "rooms", room.id, "supportRequests"), { type: "issue", note, requestedBy: state.user.uid, createdAt: serverTimestamp() });
-    notifyAdmin(`${state.business.name} reported an issue in "${room.goal}": ${note}`, "Issue reported", `${location.origin}/#/room/${room.id}/chat`);
     toast("Thanks — we'll follow up.");
   };
 }
@@ -1101,86 +1080,6 @@ function renderWhatsNext() {
 }
 
 // ============================================================
-// Screen: Admin Dashboard (visible only if admins/{uid} exists)
-// ============================================================
-async function renderAdmin() {
-  if (!state.isAdmin) { go("#/rooms"); return; }
-  renderTopbar({ title: "Admin", back: true });
-  renderBottomNav("profile");
-  appEl.innerHTML = `
-    <h1 class="page-title">Admin Dashboard</h1>
-    <p class="page-sub">Visible only to you — this is where the numbers and requests that don't show up anywhere else in the app actually live.</p>
-    <h2 class="section-title"><i class="fa-solid fa-trophy"></i> Partnership funnel</h2>
-    <div id="statsBlock">${loadingHTML("Loading stats…")}</div>
-    <h2 class="section-title"><i class="fa-solid fa-life-ring"></i> Support requests</h2>
-    <div id="supportFeed">${loadingHTML("Loading…")}</div>
-    <h2 class="section-title"><i class="fa-solid fa-layer-group"></i> All rooms</h2>
-    <div id="allRoomsList">${loadingHTML("Loading…")}</div>
-  `;
-
-  // --- Partnership funnel (the North Star metric, made visible) ---
-  const allRoomsSnap = await getDocs(collection(db, "rooms"));
-  const rooms = allRoomsSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
-  const counts = { open: 0, negotiating: 0, confirmed: 0, running: 0, completed: 0 };
-  rooms.forEach((r) => { if (counts[r.status] !== undefined) counts[r.status]++; });
-  const launched = counts.running + counts.completed;
-  document.getElementById("statsBlock").innerHTML = `
-    <div class="card">
-      <div class="checklist-item"><span class="check"><i class="fa-solid fa-trophy"></i></span>
-        <span><strong>${launched}</strong> room${launched === 1 ? "" : "s"} reached a launched campaign — your North Star number</span>
-      </div>
-      <div class="meta-line" style="margin-top:6px;">
-        Open: ${counts.open} · Negotiating: ${counts.negotiating} · Confirmed: ${counts.confirmed} · Running: ${counts.running} · Completed: ${counts.completed}
-      </div>
-    </div>
-  `;
-
-  // --- Support requests, aggregated across every room (the thing that was going into a void) ---
-  const feedEl = document.getElementById("supportFeed");
-  try {
-    const supSnap = await getDocs(query(collectionGroup(db, "supportRequests"), orderBy("createdAt", "desc")));
-    if (!supSnap.docs.length) {
-      feedEl.innerHTML = `<p class="hint">No support requests yet.</p>`;
-    } else {
-      const items = await Promise.all(supSnap.docs.map(async (d) => {
-        const data = d.data();
-        const roomId = d.ref.parent.parent.id;
-        const roomSnap = await getDoc(doc(db, "rooms", roomId));
-        const biz = await loadBusiness(data.requestedBy);
-        return { ...data, roomId, roomGoal: roomSnap.exists() ? roomSnap.data().goal : "Room", bizName: biz?.name };
-      }));
-      const iconMap = { moderator: "fa-user-tie", checkin: "fa-calendar-check", issue: "fa-triangle-exclamation" };
-      feedEl.innerHTML = items.map((it) => `
-        <div class="card room-card" data-room="${it.roomId}">
-          <div class="thumb"><i class="fa-solid ${iconMap[it.type] || "fa-bell"}"></i></div>
-          <div class="info">
-            <div class="row-top"><h3 style="text-transform:capitalize;">${esc(it.type)}</h3></div>
-            <div class="meta-line">${esc(it.bizName || "Someone")} · "${esc(it.roomGoal)}"</div>
-            ${it.note ? `<div class="meta-line">"${esc(it.note)}"</div>` : ""}
-          </div>
-        </div>`).join("");
-      feedEl.querySelectorAll(".room-card").forEach((c) => { c.onclick = () => go(`#/room/${c.dataset.room}/chat`); });
-    }
-  } catch (e) {
-    feedEl.innerHTML = `<p class="hint">Can't load yet — check the browser console for a Firestore index link (one-time setup, same pattern as Inbox).</p>`;
-    console.warn("Admin support feed needs an index:", e);
-  }
-
-  // --- Every room, regardless of who owns it ---
-  document.getElementById("allRoomsList").innerHTML = rooms.map((r) => `
-    <div class="card room-card" data-id="${r.id}">
-      <div class="thumb"><i class="fa-solid fa-store"></i></div>
-      <div class="info">
-        <div class="row-top"><h3>${esc(r.goal)}</h3><span class="status-pill status-${r.status}">${r.status}</span></div>
-        <div class="meta-line"><i class="fa-solid fa-location-dot"></i>${esc(r.location || "")}</div>
-      </div>
-    </div>`).join("");
-  document.getElementById("allRoomsList").querySelectorAll(".room-card").forEach((c) => {
-    c.onclick = () => go(`#/room/${c.dataset.id}/chat`);
-  });
-}
-
-// ============================================================
 // Router
 // ============================================================
 async function router() {
@@ -1204,7 +1103,6 @@ async function router() {
   if (route === "rooms" || !route) renderMyRooms();
   else if (route === "explore") renderExplore();
   else if (route === "inbox") renderInbox();
-  else if (route === "admin") renderAdmin();
   else if (route === "profile") renderProfile();
   else if (route === "create-room") renderCreateRoom();
   else if (route === "room" && id && !sub) renderRoomDetails(id);
@@ -1224,17 +1122,9 @@ window.addEventListener("hashchange", router);
 onAuthStateChanged(auth, async (user) => {
   state.user = user;
   state.business = user ? await loadBusiness(user.uid) : null;
-  state.isAdmin = user ? await checkIsAdmin(user.uid) : false;
   router();
   if (user && window.OneSignal) initOneSignal();
 });
-
-async function checkIsAdmin(uid) {
-  try {
-    const snap = await getDoc(doc(db, "admins", uid));
-    return snap.exists();
-  } catch (e) { return false; } // not an admin, or rules blocked it — either way, treat as non-admin
-}
 
 async function initOneSignal() {
   try {

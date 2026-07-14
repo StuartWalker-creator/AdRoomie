@@ -243,6 +243,11 @@ p.page-sub { color: var(--text-muted); font-size: 13.5px; margin: 0 0 18px; line
 .msg-row.theirs .bubble { background: var(--accent-light); color: var(--text); border-bottom-left-radius: 4px; }
 .bubble img { max-width: 100%; border-radius: 8px; margin-bottom: 4px; display: block; }
 .msg-time { font-size: 10.5px; color: var(--text-muted); margin-top: 3px; padding: 0 4px; }
+.admin-tag {
+  font-size: 10.5px; font-weight: 700; color: var(--accent); display: flex; align-items: center; gap: 4px;
+  margin-bottom: 3px; padding: 0 4px;
+}
+.admin-bubble { border: 1.5px solid var(--accent); background: var(--white) !important; color: var(--text) !important; }
 
 .chat-input-bar {
   display: flex; align-items: center; gap: 8px;
