@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+<meta name="description" content="Stop advertising alone. adRoomie helps businesses collaborate on shared ad campaigns, split costs, reach more customers, and grow through better partnerships." />
+<title>adRoomie — Grow together. Advertise together.</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <div id="topbar" class="topbar"><!-- rendered by app.js per screen --></div>
+
+    <div id="app" class="content">
+      <!-- Boot splash — shown until Firebase resolves auth state, then app.js takes over -->
+      <div class="splash">
+        <div class="splash-logo"><i class="fa-solid fa-handshake"></i></div>
+        <h1 class="splash-title">adRoomie</h1>
+        <p class="splash-tagline">Grow together. Advertise together.</p>
+        <p class="splash-blurb">
+          You're about to team up with nearby businesses to co-create ad campaigns,
+          share creative costs, and reach each other's customers — all in one place.
+        </p>
+        <div class="splash-loader"><i class="fa-solid fa-circle-notch fa-spin"></i> Setting things up…</div>
+      </div>
+    </div>
+
+    <div id="bottomNav"><!-- rendered by app.js when logged in --></div>
+    <div class="toast" id="toast"></div>
+  </div>
+
+  <!-- OneSignal Web Push SDK -->
+  <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
+
+  <!-- App logic (Firebase imported as ES modules straight from the CDN inside app.js) -->
+  <script type="module" src="app.js"></script>
+</body>
+</html>
