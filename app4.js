@@ -1226,7 +1226,7 @@ onAuthStateChanged(auth, async (user) => {
   state.business = user ? await loadBusiness(user.uid) : null;
   state.isAdmin = user ? await checkIsAdmin(user.uid) : false;
   router();
-  if (user) initOneSignal();
+  if (user && window.OneSignal) initOneSignal();
 });
 
 async function checkIsAdmin(uid) {
@@ -1241,13 +1241,6 @@ async function initOneSignal() {
     window.OneSignalDeferred = window.OneSignalDeferred || [];
     OneSignalDeferred.push(async (OneSignal) => {
       await OneSignal.init({ appId: ONESIGNAL_APP_ID });
-      // init() alone does NOT show the permission prompt on the current SDK —
-      // it has to be requested explicitly, or Auto Prompt has to be enabled
-      // in the OneSignal dashboard (Settings > Push & In-App > Web).
-      const alreadyDecided = OneSignal.Notifications.permission !== "default";
-      if (!alreadyDecided) {
-        await OneSignal.Notifications.requestPermission();
-      }
       const id = await OneSignal.User.PushSubscription.id;
       if (id && state.business && state.business.oneSignalPlayerId !== id) {
         await updateDoc(doc(db, "businesses", state.user.uid), { oneSignalPlayerId: id });
