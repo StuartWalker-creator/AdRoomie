@@ -89,10 +89,7 @@ function esc(str) {
 }
 function initials(name) { return (name || "??").trim().slice(0, 2).toUpperCase(); }
 function clearListeners() { state.unsub.forEach((u) => u()); state.unsub = []; }
-function go(hash, opts = {}) {
-  if (opts.replace) { history.replaceState(null, "", hash); router(); }
-  else { window.location.hash = hash; }
-}
+function go(hash) { window.location.hash = hash; }
 function loadingHTML(msg) { return `<div class="loading-spin"><i class="fa-solid fa-circle-notch fa-spin"></i>${esc(msg || "Loading…")}</div>`; }
 
 // WhatsApp-style short time, e.g. "10:32 AM". Handles the brief moment
@@ -154,46 +151,6 @@ async function notifyAdmin(message, title, url) {
   if (!ADMIN_UID || ADMIN_UID === "YOUR_FIREBASE_AUTH_UID") return; // not configured yet
   const admin = await loadBusiness(ADMIN_UID);
   notifyPartner(admin?.oneSignalPlayerId, message, title, url);
-}
-
-// ============================================================
-// Mutual-confirmation button — both partners must check their own
-// side before a stage actually advances. Used for "Mark as Agreement
-// Reached", "We've launched our ads", and "Mark Campaign Complete" —
-// none of those should be flippable by just one partner.
-// ============================================================
-function myRole(room) { return room.createdBy === state.user.uid ? "creator" : "partner"; }
-
-function renderConfirmButton(container, room, field, label, nextStatus, nextTab) {
-  const conf = room[field] || { creator: false, partner: false };
-  const role = myRole(room);
-  const other = role === "creator" ? "partner" : "creator";
-  const mine = conf[role], theirs = conf[other];
-
-  let html;
-  if (mine && theirs) {
-    html = `<button class="btn btn-secondary" disabled><i class="fa-solid fa-circle-check"></i> Confirmed by both partners</button>`;
-  } else if (mine && !theirs) {
-    html = `<button class="btn btn-outline" id="confirmBtn"><i class="fa-solid fa-square-check"></i> Waiting for your partner to confirm…</button>`;
-  } else {
-    html = `<button class="btn btn-primary" id="confirmBtn"><i class="fa-regular fa-square"></i> ${label}</button>`;
-  }
-  container.innerHTML = html;
-
-  const btn = document.getElementById("confirmBtn");
-  if (!btn) return;
-  btn.onclick = async () => {
-    const updated = { ...conf, [role]: !mine };
-    await updateDoc(doc(db, "rooms", room.id), { [field]: updated });
-    room[field] = updated;
-    if (updated.creator && updated.partner) {
-      await updateDoc(doc(db, "rooms", room.id), { status: nextStatus });
-      toast("Both confirmed — moving on!");
-      go(`#/room/${room.id}/${nextTab}`);
-    } else {
-      renderConfirmButton(container, room, field, label, nextStatus, nextTab);
-    }
-  };
 }
 
 // Simple rule-based match score (no AI) — approximates the blueprint's weights:
@@ -730,13 +687,6 @@ function renderCreateRoom() {
       </div>
     </div>
     <div class="field"><label>Type of partner you're looking for</label>${renderChipGroup("partnerTypeChips", CATEGORY_OPTIONS, selectedPartnerTypes)}</div>
-    <div class="card" style="display:flex;gap:10px;align-items:flex-start;">
-      <input type="checkbox" id="ownershipCheck" style="margin-top:3px;width:16px;height:16px;flex-shrink:0;">
-      <label for="ownershipCheck" style="font-size:12.5px;color:var(--text-muted);font-weight:400;">
-        Either business may keep and reuse the shared creative after this campaign ends.
-        Neither business may stop the other from using it.
-      </label>
-    </div>
     <p class="error-text" id="errorText"></p>
     <button class="btn btn-primary" id="createBtn"><i class="fa-solid fa-plus"></i> Create Room</button>
   `;
@@ -753,10 +703,6 @@ function renderCreateRoom() {
     const duration = document.getElementById("duration").value;
     if (!goal || !budgetRange || !duration || selectedPlatforms.size === 0 || selectedAudience.size === 0 || selectedPartnerTypes.size === 0) {
       errorText.textContent = "Please fill in every field, and pick at least one audience, platform, and partner type.";
-      errorText.classList.add("show"); return;
-    }
-    if (!document.getElementById("ownershipCheck").checked) {
-      errorText.textContent = "Please confirm the creative-ownership terms before creating the room.";
       errorText.classList.add("show"); return;
     }
     const ref = await addDoc(collection(db, "rooms"), {
@@ -868,7 +814,7 @@ async function renderRoomHub(roomId, tab = "chat") {
   if (!snap.exists()) { appEl.innerHTML = `<div class="empty-state">Room not found.</div>`; return; }
   const room = { id: roomId, ...snap.data() };
 
-  if (room.status === "completed" && tab !== "review" && tab !== "track") { renderCampaignComplete(roomId, room); return; }
+  if (room.status === "completed" && tab !== "review") { renderCampaignComplete(roomId, room); return; }
 
   // Immersive room mode: no bottom nav (the back arrow exits, same as most chat apps),
   // and the topbar collapses on scroll-down / reappears on scroll-up.
@@ -889,7 +835,7 @@ async function renderRoomHub(roomId, tab = "chat") {
     </div>
     <div id="tabContent"></div>
   `;
-  document.querySelectorAll("#tabBar .tab-item").forEach((b) => { b.onclick = () => go(`#/room/${roomId}/${b.dataset.t}`, { replace: true }); });
+  document.querySelectorAll("#tabBar .tab-item").forEach((b) => { b.onclick = () => go(`#/room/${roomId}/${b.dataset.t}`); });
   wireCollapsibleTopbar();
 
   const content = document.getElementById("tabContent");
@@ -909,7 +855,7 @@ function renderChatTab(container, room) {
       <input id="msgInput" placeholder="Type a message...">
       <button class="round-btn send" id="sendMsgBtn"><i class="fa-solid fa-paper-plane"></i></button>
     </div>
-    ${room.status === "negotiating" ? `<div id="agreeBtnWrap" style="margin-top:12px;"></div>` : ""}
+    ${room.status === "negotiating" ? `<button class="btn btn-secondary" id="agreeBtn" style="margin-top:12px;"><i class="fa-solid fa-handshake"></i> Mark as Agreement Reached</button>` : ""}
   `;
   const msgsQuery = query(collection(db, "rooms", room.id, "messages"), orderBy("createdAt", "asc"));
   const unsub = onSnapshot(msgsQuery, (snap) => {
@@ -951,7 +897,11 @@ function renderChatTab(container, room) {
     await send(null, url);
   };
   if (room.status === "negotiating") {
-    renderConfirmButton(document.getElementById("agreeBtnWrap"), room, "agreementConfirmed", "Mark as Agreement Reached", "confirmed", "workspace");
+    document.getElementById("agreeBtn").onclick = async () => {
+      await updateDoc(doc(db, "rooms", room.id), { status: "confirmed" });
+      toast("Partnership confirmed!");
+      go(`#/room/${room.id}/workspace`);
+    };
   }
 }
 
@@ -969,7 +919,7 @@ function renderWorkspaceTab(container, room) {
     <div id="creativesGrid"></div>
     <div class="upload-dropzone" id="creativeDrop"><i class="fa-solid fa-cloud-arrow-up"></i><strong>Upload / Add Creative</strong>Or ask adRoomie for help — reply in Chat</div>
     <input type="file" id="creativeInput" accept="image/*" style="display:none;">
-    ${room.status === "confirmed" ? `<div id="launchBtnWrap" style="margin-top:16px;"></div>` : ""}
+    ${room.status === "confirmed" || room.status === "running" ? `<button class="btn btn-primary" id="launchedBtn" style="margin-top:16px;"><i class="fa-solid fa-rocket"></i> We've launched our ads</button>` : ""}
   `;
   loadBusiness(otherId).then((b) => {
     document.getElementById("partnersBlock").innerHTML = `
@@ -992,9 +942,12 @@ function renderWorkspaceTab(container, room) {
     drawCreatives();
     toast("Creative added!");
   };
-  if (room.status === "confirmed") {
-    renderConfirmButton(document.getElementById("launchBtnWrap"), room, "launchConfirmed", "We've launched our ads", "running", "track");
-  }
+  const launchedBtn = document.getElementById("launchedBtn");
+  if (launchedBtn) launchedBtn.onclick = async () => {
+    await updateDoc(doc(db, "rooms", room.id), { status: "running" });
+    toast("Marked as running — good luck!");
+    go(`#/room/${room.id}/track`);
+  };
 }
 
 function renderLaunchTab(container, room) {
@@ -1008,45 +961,11 @@ function renderLaunchTab(container, room) {
       <div class="step"><div class="box"><i class="fa-solid fa-house"></i></div><div class="label">Partner's Ad Account</div></div>
     </div>
     <div class="callout"><i class="fa-solid fa-shield-heart"></i><span>You run the ad. You pay Meta directly. Your partner does the same. adRoomie never touches your ad account or your money.</span></div>
-
-    <h2 class="section-title"><i class="fa-solid fa-clipboard-check"></i> Before you start</h2>
-    <div class="checklist-item"><span class="check"><i class="fa-solid fa-circle-check"></i></span>Each business needs its own Facebook Page (not just a personal profile).</div>
-    <div class="checklist-item"><span class="check"><i class="fa-solid fa-circle-check"></i></span>That Page should be connected to Meta Business Suite.</div>
-    <div class="checklist-item"><span class="check"><i class="fa-solid fa-circle-check"></i></span>Instagram account linked too, if you're running ads there as well.</div>
-    <a href="https://business.facebook.com" target="_blank" rel="noopener" class="btn btn-outline" style="margin-top:6px;">
-      <i class="fa-solid fa-arrow-up-right-from-square"></i> Open Meta Business Suite
-    </a>
-    <p class="hint">Don't have a Page yet? Meta Business Suite will walk you through creating one — it's free.</p>
-
-    <h2 class="section-title"><i class="fa-solid fa-people-arrows"></i> The two roles, explained</h2>
-    <p class="page-sub" style="margin-bottom:14px;">
-      Meta's Partnership Ads tool wasn't built with two equal businesses in mind — it's built around a "creator" tagging a "brand." To get the mirrored setup this room needs, <strong>each of you plays both roles once</strong>, tagging the other.
-    </p>
-    <div class="card" style="margin-bottom:10px;">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-        <div class="icon-wrap" style="width:28px;height:28px;font-size:12px;"><i class="fa-solid fa-tag"></i></div>
-        <strong style="font-size:13.5px;">Role 1 — Tagging your partner</strong>
-      </div>
-      <p class="hint" style="margin:0;">In Meta's settings, this is called being the "creator." You turn on branded content tools and tag your partner's Page as a paid partnership — this is what lets them include you in their ad.</p>
-    </div>
-    <div class="card" style="margin-bottom:16px;">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-        <div class="icon-wrap" style="width:28px;height:28px;font-size:12px;"><i class="fa-solid fa-rectangle-ad"></i></div>
-        <strong style="font-size:13.5px;">Role 2 — Building your own ad</strong>
-      </div>
-      <p class="hint" style="margin:0;">Meta calls this the "brand" or "advertiser." You request partnership access to your partner's Page, they accept, and then you build and pay for your own ad using the shared creative, with their Page tagged alongside yours.</p>
-    </div>
-
-    <h2 class="section-title">Step by step</h2>
-    <div class="checklist-item"><span class="num">1</span>Both businesses turn on branded content / partnership tools for their Page (Meta Business Suite → Page settings).</div>
-    <div class="checklist-item"><span class="num">2</span>Each of you sends the other a partnership request — in Ads Manager, look for <strong>Partnership Ads Hub</strong> under "All tools."</div>
-    <div class="checklist-item"><span class="num">3</span>Accept each other's requests. This is the step that actually links your two Pages.</div>
-    <div class="checklist-item"><span class="num">4</span>Each business builds their own ad, using the shared creative from the Workspace tab, and selects their partner as the tagged identity.</div>
-    <div class="checklist-item"><span class="num">5</span>Publish. Each of you is now running your own ad, paid from your own account, with both Pages appearing on it.</div>
-    <div class="checklist-item"><span class="num">6</span>Share your ad link in Chat once live, so your partner can confirm theirs matches.</div>
-
+    <h2 class="section-title">Next Steps</h2>
+    <div class="checklist-item"><span class="num">1</span>Each business launches the ad from your own Meta ad account.</div>
+    <div class="checklist-item"><span class="num">2</span>Use Meta Partnership Ads and tag each other so both Pages appear.</div>
+    <div class="checklist-item"><span class="num">3</span>Share your ad links in Chat once live so your partner can confirm.</div>
     <p class="hint"><i class="fa-solid fa-circle-info"></i> Partnership Ad authorization codes expire — you may need to refresh them if the campaign runs long.</p>
-    <p class="hint"><i class="fa-solid fa-triangle-exclamation"></i> Meta renames and moves things fairly often. If a menu doesn't match exactly, search "Partnership Ads" inside Meta Business Suite's help — the concept above stays the same even when the button locations move.</p>
   `;
 }
 
@@ -1057,7 +976,7 @@ function renderTrackTab(container, room) {
     <div class="upload-dropzone" id="resultsDrop"><i class="fa-solid fa-cloud-arrow-up"></i><strong>Upload Screenshot</strong>JPG, PNG up to 6MB</div>
     <input type="file" id="resultsInput" accept="image/*" style="display:none;">
     <div id="resultsGrid" style="margin-top:14px;"></div>
-    ${room.status === "running" ? `<div id="completeBtnWrap" style="margin-top:18px;"></div>` : ""}
+    ${room.status === "running" ? `<button class="btn btn-primary" id="completeBtn" style="margin-top:18px;"><i class="fa-solid fa-flag-checkered"></i> Mark Campaign Complete</button>` : ""}
   `;
   function drawResults() {
     document.getElementById("resultsGrid").innerHTML = (room.results || []).map((r) => `<img class="creative-thumb" src="${r.url}">`).join("");
@@ -1073,9 +992,12 @@ function renderTrackTab(container, room) {
     drawResults();
     toast("Saved!");
   };
-  if (room.status === "running") {
-    renderConfirmButton(document.getElementById("completeBtnWrap"), room, "completeConfirmed", "Mark Campaign Complete", "completed", "complete");
-  }
+  const completeBtn = document.getElementById("completeBtn");
+  if (completeBtn) completeBtn.onclick = async () => {
+    await updateDoc(doc(db, "rooms", room.id), { status: "completed" });
+    toast("Campaign marked complete!");
+    go(`#/room/${room.id}/complete`);
+  };
 }
 
 function renderSupportTab(container, room) {
@@ -1153,11 +1075,10 @@ async function renderReview(roomId) {
   document.getElementById("submitReviewBtn").onclick = async () => {
     if (!rating) { toast("Please pick a star rating."); return; }
     await addDoc(collection(db, "reviews"), { roomId, reviewerId: state.user.uid, revieweeId: otherId, rating, comment: document.getElementById("comment").value.trim(), createdAt: serverTimestamp() });
-    // Note: we deliberately don't write a rolled-up average onto the reviewee's own
-    // business doc here — the rules correctly forbid writing another business's
-    // profile (otherwise anyone could fake anyone's rating). A safe rollup needs
-    // either a live aggregation query wherever a rating is displayed, or a Cloud
-    // Function trigger — both deferred for now since nowhere in the UI shows it yet.
+    const revSnap = await getDocs(query(collection(db, "reviews"), where("revieweeId", "==", otherId)));
+    const all = revSnap.docs.map((d) => d.data());
+    const avg = all.reduce((s, r) => s + r.rating, 0) / all.length;
+    await updateDoc(doc(db, "businesses", otherId), { rating: avg, reviewCount: all.length });
     toast("Review submitted!");
     go(`#/room/${roomId}/whatsnext`);
   };
