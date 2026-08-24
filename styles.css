@@ -20,6 +20,9 @@
   --radius: 14px;
   --radius-sm: 8px;
   --shadow: 0 2px 10px rgba(30,30,42,0.06);
+  /* Width of the phone-style column. Same variable drives .app-shell and
+     .bottom-nav so they always line up — change this, not the 480px values. */
+  --shell-width: 480px;
 }
 
 * { box-sizing: border-box; }
@@ -35,7 +38,7 @@ button, input, select, textarea { font-family: inherit; }
 
 /* ---------- App shell — fixed height, content scrolls internally ---------- */
 .app-shell {
-  max-width: 480px;
+  max-width: var(--shell-width);
   margin: 0 auto;
   height: 100vh;
   overflow: hidden;
@@ -43,6 +46,60 @@ button, input, select, textarea { font-family: inherit; }
   display: flex;
   flex-direction: column;
   position: relative;
+}
+
+/* ---------- Desktop / large screens ----------
+   Below ~700px the app IS the whole screen (real mobile). Above that, we're
+   on a tablet or desktop browser window, so instead of stretching the same
+   phone layout edge-to-edge (looks broken) we frame it like a real app
+   window: fixed phone-width column, centered, with a bit of chrome. The
+   marketing landing page gets its own wider treatment below — see
+   `.app-shell.landing-wide`. */
+@media (min-width: 700px) {
+  body {
+    background: radial-gradient(circle at 15% -10%, var(--accent-light) 0%, var(--bg) 55%);
+    min-height: 100vh;
+  }
+  .app-shell {
+    margin: 28px auto;
+    height: calc(100vh - 56px);
+    min-height: 560px;
+    border-radius: 26px;
+    box-shadow: 0 24px 60px rgba(30,30,42,0.16);
+    border: 1px solid var(--border);
+  }
+  .topbar { border-top-left-radius: 26px; border-top-right-radius: 26px; }
+  .bottom-nav {
+    bottom: 28px;
+    border-bottom-left-radius: 26px;
+    border-bottom-right-radius: 26px;
+    box-shadow: 0 10px 24px rgba(30,30,42,0.10);
+  }
+}
+
+/* ---------- Landing page on desktop — real marketing-page width ---------- */
+@media (min-width: 900px) {
+  .app-shell.landing-wide {
+    --shell-width: 1100px;
+    border-radius: 0;
+    box-shadow: none;
+    border: none;
+    margin: 0 auto;
+    height: auto;
+    min-height: 100vh;
+  }
+  .app-shell.landing-wide .content { padding-left: 56px; padding-right: 56px; }
+  .app-shell.landing-wide .landing-topbar { padding: 20px 0 40px; }
+  .app-shell.landing-wide .hero-flex {
+    display: flex; flex-direction: row; align-items: flex-start; gap: 64px;
+  }
+  .app-shell.landing-wide .hero-copy { flex: 1 1 0; min-width: 0; }
+  .app-shell.landing-wide .hero-visual { flex: 0 0 400px; position: sticky; top: 32px; }
+  .app-shell.landing-wide .hero-title { font-size: 42px; }
+  .app-shell.landing-wide .hero-sub { font-size: 16px; max-width: 520px; }
+  .app-shell.landing-wide .badge-grid { grid-template-columns: repeat(3, 1fr); }
+  .app-shell.landing-wide .steps-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 40px; }
+  .app-shell.landing-wide .closing-card { padding: 40px; }
 }
 
 .topbar {
@@ -317,7 +374,7 @@ p.page-sub { color: var(--text-muted); font-size: 13.5px; margin: 0 0 18px; line
 
 /* ---------- Bottom nav ---------- */
 .bottom-nav {
-  position: fixed; bottom: 0; left: 50%; transform: translateX(-50%); width: 100%; max-width: 480px;
+  position: fixed; bottom: 0; left: 50%; transform: translateX(-50%); width: 100%; max-width: var(--shell-width);
   background: var(--white); border-top: 1px solid var(--border); display: flex; justify-content: space-around;
   padding: 9px 0 12px; z-index: 30;
 }

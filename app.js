@@ -31,7 +31,7 @@ const firebaseConfig = {
   measurementId: "G-GN4W36P8EB"
 };
 const CLOUDINARY_CLOUD_NAME = "dvdshonhc";
-const CLOUDINARY_UPLOAD_PRESET = "adroooomie";
+const CLOUDINARY_UPLOAD_PRESET = "adroomie";
 const ONESIGNAL_APP_ID = "a0bcdf64-4d1a-4360-bc6e-1e01d14c6e5f";
 // Your own Firebase Auth UID (Authentication → Users). Must also exist as a doc
 // in the "admins" Firestore collection — that's what the security rules check.
@@ -52,6 +52,7 @@ const appEl = document.getElementById("app");
 const topbarEl = document.getElementById("topbar");
 const navEl = document.getElementById("bottomNav");
 const toastEl = document.getElementById("toast");
+const shellEl = document.querySelector(".app-shell");
 
 const state = { user: null, business: null, unsub: [], _scrollHandler: null, isAdmin: false };
 
@@ -95,6 +96,69 @@ function go(hash, opts = {}) {
 }
 function loadingHTML(msg) { return `<div class="loading-spin"><i class="fa-solid fa-circle-notch fa-spin"></i>${esc(msg || "Loading…")}</div>`; }
 
+// ============================================================
+// Invite links — someone clicks a shared "#/room/{id}" link before they're
+// logged in. We can't show them the room (Firestore rules require auth), so
+// we park the intended destination in sessionStorage, show a lightweight
+// "you've been invited" prompt, and once they sign up/log in and (for new
+// users) finish their profile, we send them straight there instead of the
+// default Rooms screen. Consumed once, so it never hijacks normal navigation.
+// ============================================================
+const PENDING_ROUTE_KEY = "adroomie_pending_route";
+function isInviteableRoute(hash) { return /^#\/room\/[^/]+$/.test(hash); }
+function savePendingRoute(hash) { try { sessionStorage.setItem(PENDING_ROUTE_KEY, hash); } catch (e) {} }
+function peekPendingRoute() { try { return sessionStorage.getItem(PENDING_ROUTE_KEY); } catch (e) { return null; } }
+function consumePendingRoute() {
+  try {
+    const r = sessionStorage.getItem(PENDING_ROUTE_KEY);
+    if (r) sessionStorage.removeItem(PENDING_ROUTE_KEY);
+    return r;
+  } catch (e) { return null; }
+}
+
+function renderInvitePrompt() {
+  topbarEl.style.display = "none";
+  topbarEl.innerHTML = "";
+  navEl.innerHTML = "";
+  appEl.classList.add("no-bottom-nav");
+  appEl.innerHTML = `
+    <div class="splash" style="min-height:82vh;">
+      <div class="splash-logo"><i class="fa-solid fa-handshake"></i></div>
+      <h1 class="splash-title" style="font-size:23px;">You've been invited to a room</h1>
+      <p class="splash-blurb">
+        Someone shared an adRoomie partnership room with you. Sign up (or log in,
+        if you already have an account) and you'll be taken straight there.
+      </p>
+      <button class="btn btn-primary" id="inviteSignupBtn" style="width:100%;max-width:280px;">
+        <i class="fa-solid fa-user-plus"></i> Create an account
+      </button>
+      <button class="btn btn-outline" id="inviteLoginBtn" style="width:100%;max-width:280px;margin-top:10px;">
+        Already have an account? Log in
+      </button>
+    </div>
+  `;
+  document.getElementById("inviteSignupBtn").onclick = () => go("#/signup");
+  document.getElementById("inviteLoginBtn").onclick = () => go("#/login");
+}
+
+// Generates a shareable link to a room and hands it to WhatsApp/etc. — via the
+// native share sheet on mobile (which lists WhatsApp directly), or a clipboard
+// copy as the desktop fallback.
+async function shareRoomInvite(roomId, goal) {
+  const link = `${location.origin}${location.pathname}#/room/${roomId}`;
+  const text = `I'm looking for a business to team up with and co-run an ad campaign on adRoomie: "${goal}". Take a look and request to join: ${link}`;
+  if (navigator.share) {
+    try { await navigator.share({ title: "adRoomie invite", text }); return; }
+    catch (e) { /* user cancelled the share sheet — that's fine, not an error */ if (e?.name === "AbortError") return; }
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    toast("Invite link copied — paste it into WhatsApp!");
+  } catch (e) {
+    toast("Couldn't copy automatically. Link: " + link);
+  }
+}
+
 // WhatsApp-style short time, e.g. "10:32 AM". Handles the brief moment
 // before Firestore's serverTimestamp() resolves (shows nothing, not an error).
 function formatTime(ts) {
@@ -128,14 +192,38 @@ function wireChipGroup(containerId, selectedSet) {
   });
 }
 
+// Basic client-side check before we even try the network call — catches the
+// most common "why did it fail" causes (wrong file type, huge file) instantly,
+// instead of waiting on a round trip to Cloudinary just to say the same thing.
+function validateImageFile(file) {
+  if (!file.type || !file.type.startsWith("image/")) return "Please choose an image file (JPG, PNG, etc.).";
+  if (file.size > 6 * 1024 * 1024) return "That image is over 6MB — please choose a smaller one.";
+  return null;
+}
+
 async function uploadToCloudinary(file) {
   const url = `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`;
   const formData = new FormData();
   formData.append("file", file);
   formData.append("upload_preset", CLOUDINARY_UPLOAD_PRESET);
-  const res = await fetch(url, { method: "POST", body: formData });
-  if (!res.ok) throw new Error("Upload failed");
-  return (await res.json()).secure_url;
+  let res;
+  try {
+    res = await fetch(url, { method: "POST", body: formData });
+  } catch (networkErr) {
+    // fetch() itself only throws on network-level failures (offline, DNS, CORS block) —
+    // Cloudinary being down or misconfigured comes back as a normal (non-ok) response below.
+    throw new Error("Couldn't reach the upload server — check your internet connection.");
+  }
+  // Cloudinary returns a JSON body with a real error message even on failure
+  // (e.g. "Upload preset not found", "Invalid image file") — surface that instead
+  // of a generic "Upload failed", so it's actually possible to diagnose from the toast.
+  const data = await res.json().catch(() => null);
+  if (!res.ok) {
+    const msg = data?.error?.message || `Upload failed (server said: ${res.status})`;
+    throw new Error(msg);
+  }
+  if (!data?.secure_url) throw new Error("Upload succeeded but no image URL came back — try again.");
+  return data.secure_url;
 }
 
 async function notifyPartner(playerId, message, title, url) {
@@ -290,6 +378,7 @@ function renderLanding() {
   topbarEl.innerHTML = "";
   navEl.innerHTML = "";
   appEl.classList.add("no-bottom-nav");
+  shellEl.classList.add("landing-wide");
 
   const whyCards = [
     ["fa-solid fa-people-arrows", "Split ad costs, not results", "Share the creative cost. Each runs their own ad. You both reach more."],
@@ -317,31 +406,37 @@ function renderLanding() {
       </div>
     </div>
 
-    <div class="hero-badge"><i class="fa-solid fa-sparkles"></i> The smarter way to advertise</div>
-    <h1 class="hero-title">No more struggling with ad costs.<br><span class="accent">Advertise together.</span><br>Reach <span class="accent">more.</span></h1>
-    <p class="hero-sub">adRoomie connects two compatible businesses so you can create one great ad, share the cost, and promote it to each other's audience. More customers. Less cost. Together, you win.</p>
+    <div class="hero-flex">
+      <div class="hero-copy">
+        <div class="hero-badge"><i class="fa-solid fa-sparkles"></i> The smarter way to advertise</div>
+        <h1 class="hero-title">No more struggling with ad costs.<br><span class="accent">Advertise together.</span><br>Reach <span class="accent">more.</span></h1>
+        <p class="hero-sub">adRoomie connects two compatible businesses so you can create one great ad, share the cost, and promote it to each other's audience. More customers. Less cost. Together, you win.</p>
 
-    <button class="btn btn-primary" id="heroCtaBtn"><i class="fa-solid fa-arrow-right"></i> Get started for free</button>
-    <button class="btn btn-outline" id="howItWorksBtn" style="width:100%;margin-top:8px;"><i class="fa-solid fa-play"></i> See how it works</button>
+        <button class="btn btn-primary" id="heroCtaBtn"><i class="fa-solid fa-arrow-right"></i> Get started for free</button>
+        <button class="btn btn-outline" id="howItWorksBtn" style="width:100%;margin-top:8px;"><i class="fa-solid fa-play"></i> See how it works</button>
 
-    <div style="margin-top:22px;">
-      <div class="trust-row-item"><div class="icon-wrap"><i class="fa-solid fa-shield-halved"></i></div>
-        <div><div class="name">Safe & trusted</div><div class="sub">Verified businesses & reviews.</div></div></div>
-      <div class="trust-row-item"><div class="icon-wrap"><i class="fa-solid fa-people-group"></i></div>
-        <div><div class="name">Built for collaboration</div><div class="sub">One room. One plan. Two businesses.</div></div></div>
-      <div class="trust-row-item"><div class="icon-wrap"><i class="fa-solid fa-sack-dollar"></i></div>
-        <div><div class="name">Save on ad costs</div><div class="sub">Split creative cost. Each pays their own ads.</div></div></div>
-    </div>
-
-    <div class="card hero-preview-card">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
-        <div class="avatar-circle sm" style="background:#8b5e34;"><i class="fa-solid fa-mug-hot"></i></div>
-        <span style="font-weight:700;color:var(--text-muted);">+</span>
-        <div class="avatar-circle sm" style="background:#2e7d5b;"><i class="fa-solid fa-book"></i></div>
-        <span class="status-pill status-negotiating" style="margin-left:auto;">Negotiating</span>
+        <div style="margin-top:22px;">
+          <div class="trust-row-item"><div class="icon-wrap"><i class="fa-solid fa-shield-halved"></i></div>
+            <div><div class="name">Safe & trusted</div><div class="sub">Verified businesses & reviews.</div></div></div>
+          <div class="trust-row-item"><div class="icon-wrap"><i class="fa-solid fa-people-group"></i></div>
+            <div><div class="name">Built for collaboration</div><div class="sub">One room. One plan. Two businesses.</div></div></div>
+          <div class="trust-row-item"><div class="icon-wrap"><i class="fa-solid fa-sack-dollar"></i></div>
+            <div><div class="name">Save on ad costs</div><div class="sub">Split creative cost. Each pays their own ads.</div></div></div>
+        </div>
       </div>
-      <div style="font-weight:700;font-size:13.5px;">Brew Haven Café × PageTurners Bookstore</div>
-      <p class="hint" style="margin:4px 0 0;">Share one ad. Reach both audiences.</p>
+
+      <div class="hero-visual">
+        <div class="card hero-preview-card">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+            <div class="avatar-circle sm" style="background:#8b5e34;"><i class="fa-solid fa-mug-hot"></i></div>
+            <span style="font-weight:700;color:var(--text-muted);">+</span>
+            <div class="avatar-circle sm" style="background:#2e7d5b;"><i class="fa-solid fa-book"></i></div>
+            <span class="status-pill status-negotiating" style="margin-left:auto;">Negotiating</span>
+          </div>
+          <div style="font-weight:700;font-size:13.5px;">Brew Haven Café × PageTurners Bookstore</div>
+          <p class="hint" style="margin:4px 0 0;">Share one ad. Reach both audiences.</p>
+        </div>
+      </div>
     </div>
 
     <p class="section-label">Why businesses choose</p>
@@ -355,11 +450,13 @@ function renderLanding() {
     <div id="howItWorksSection">
       <p class="section-label">How it works</p>
       <h2 class="section-heading">6 simple steps to powerful partnerships</h2>
-      ${steps.map((s, i) => `
-        <div class="step-card">
-          <div class="step-num">${i + 1}</div>
-          <div><h4>${s[0]}</h4><p>${s[1]}</p></div>
-        </div>`).join("")}
+      <div class="steps-grid">
+        ${steps.map((s, i) => `
+          <div class="step-card">
+            <div class="step-num">${i + 1}</div>
+            <div><h4>${s[0]}</h4><p>${s[1]}</p></div>
+          </div>`).join("")}
+      </div>
     </div>
 
     <div class="closing-card">
@@ -480,12 +577,18 @@ function renderProfile() {
   document.getElementById("avatarCircle").onclick = () => document.getElementById("avatarInput").click();
   document.getElementById("avatarInput").onchange = async (e) => {
     const file = e.target.files[0]; if (!file) return;
+    const validationError = validateImageFile(file);
+    if (validationError) { toast(validationError); e.target.value = ""; return; }
     toast("Uploading photo...");
     try {
       photoURL = await uploadToCloudinary(file);
       document.getElementById("avatarCircle").innerHTML = `<img src="${photoURL}" alt="profile"><span class="edit-dot"><i class="fa-solid fa-pen"></i></span>`;
       toast("Photo updated!");
-    } catch (err) { toast("Photo upload failed — try again."); }
+    } catch (err) {
+      toast(err.message || "Photo upload failed — try again.");
+      console.error("Avatar upload failed:", err);
+    }
+    e.target.value = ""; // allow re-selecting the same file if they try again
   };
 
   if (state.business) document.getElementById("logoutBtn").onclick = () => logOut();
@@ -694,10 +797,16 @@ async function renderInbox() {
       c.onclick = () => go(c.dataset.room ? `#/room/${c.dataset.room}` : "#/inbox");
     });
   } catch (e) {
-    // First run: Firestore will need a composite index for this collectionGroup query.
-    // The console error contains a direct "create index" link — click it once, done forever.
-    document.getElementById("sentList").innerHTML = `<p class="hint">Can't load sent requests yet — check the browser console for a Firestore index link (one-time setup).</p>`;
-    console.warn("Inbox sent-requests query needs a Firestore index:", e);
+    // Two different causes land here, and they need different fixes:
+    // 1) failed-precondition — first-ever run of this query; Firestore's console
+    //    error includes a one-click "create index" link.
+    // 2) permission-denied — a firestore.rules issue, not an index issue. Fix the
+    //    rules (see the /requests match block) and redeploy them.
+    const isIndexIssue = e?.code === "failed-precondition";
+    document.getElementById("sentList").innerHTML = isIndexIssue
+      ? `<p class="hint">Can't load sent requests yet — check the browser console for a Firestore index link (one-time setup).</p>`
+      : `<p class="hint">Can't load sent requests right now — there's a permissions issue on our end, not something on your side.</p>`;
+    console.warn(`Inbox sent-requests query failed (${e?.code || "unknown"}):`, e);
   }
 }
 
@@ -797,9 +906,15 @@ async function renderRoomDetails(roomId) {
     <div class="detail-block"><h4><i class="fa-solid fa-calendar-days"></i> Campaign Duration</h4><p>${esc(room.duration)}</p></div>
     <div class="detail-block"><h4><i class="fa-solid fa-magnifying-glass"></i> Looking For</h4><p>${esc((room.partnerType || []).join(", ") || "Any compatible business")}</p></div>
     <div class="detail-block"><h4><i class="fa-solid fa-location-dot"></i> Location</h4><p>${esc(room.location)}</p></div>
-    ${isOwner ? `<h2 class="section-title">Join Requests</h2><div id="reqList">${loadingHTML("Loading…")}</div>` : `<button class="btn btn-primary" id="joinBtn"><i class="fa-solid fa-paper-plane"></i> Request to Join Room</button>`}
+    ${isOwner ? `
+      <button class="btn btn-outline" id="inviteBtn" style="width:100%;margin-bottom:16px;"><i class="fa-solid fa-share-nodes"></i> Invite a Business to This Room</button>
+      <h2 class="section-title">Join Requests</h2><div id="reqList">${loadingHTML("Loading…")}</div>
+    ` : `<button class="btn btn-primary" id="joinBtn"><i class="fa-solid fa-paper-plane"></i> Request to Join Room</button>`}
   `;
-  if (isOwner) wireIncomingRequests(roomId);
+  if (isOwner) {
+    wireIncomingRequests(roomId);
+    document.getElementById("inviteBtn").onclick = () => shareRoomInvite(roomId, room.goal);
+  }
   else document.getElementById("joinBtn").onclick = () => go(`#/room/${roomId}/join`);
 }
 
@@ -946,9 +1061,17 @@ function renderChatTab(container, room) {
   document.getElementById("attachBtn").onclick = () => document.getElementById("fileInput").click();
   document.getElementById("fileInput").onchange = async (e) => {
     const file = e.target.files[0]; if (!file) return;
+    const validationError = validateImageFile(file);
+    if (validationError) { toast(validationError); e.target.value = ""; return; }
     toast("Uploading image...");
-    const url = await uploadToCloudinary(file);
-    await send(null, url);
+    try {
+      const url = await uploadToCloudinary(file);
+      await send(null, url);
+    } catch (err) {
+      toast(err.message || "Image upload failed — try again.");
+      console.error("Chat image upload failed:", err);
+    }
+    e.target.value = "";
   };
   if (room.status === "negotiating") {
     renderConfirmButton(document.getElementById("agreeBtnWrap"), room, "agreementConfirmed", "Mark as Agreement Reached", "confirmed", "workspace");
@@ -985,12 +1108,20 @@ function renderWorkspaceTab(container, room) {
   document.getElementById("creativeDrop").onclick = () => document.getElementById("creativeInput").click();
   document.getElementById("creativeInput").onchange = async (e) => {
     const file = e.target.files[0]; if (!file) return;
+    const validationError = validateImageFile(file);
+    if (validationError) { toast(validationError); e.target.value = ""; return; }
     toast("Uploading creative...");
-    const url = await uploadToCloudinary(file);
-    room.creatives = [...(room.creatives || []), { url, addedBy: state.user.uid }];
-    await updateDoc(doc(db, "rooms", room.id), { creatives: room.creatives });
-    drawCreatives();
-    toast("Creative added!");
+    try {
+      const url = await uploadToCloudinary(file);
+      room.creatives = [...(room.creatives || []), { url, addedBy: state.user.uid }];
+      await updateDoc(doc(db, "rooms", room.id), { creatives: room.creatives });
+      drawCreatives();
+      toast("Creative added!");
+    } catch (err) {
+      toast(err.message || "Creative upload failed — try again.");
+      console.error("Creative upload failed:", err);
+    }
+    e.target.value = "";
   };
   if (room.status === "confirmed") {
     renderConfirmButton(document.getElementById("launchBtnWrap"), room, "launchConfirmed", "We've launched our ads", "running", "track");
@@ -1066,12 +1197,20 @@ function renderTrackTab(container, room) {
   document.getElementById("resultsDrop").onclick = () => document.getElementById("resultsInput").click();
   document.getElementById("resultsInput").onchange = async (e) => {
     const file = e.target.files[0]; if (!file) return;
+    const validationError = validateImageFile(file);
+    if (validationError) { toast(validationError); e.target.value = ""; return; }
     toast("Uploading screenshot...");
-    const url = await uploadToCloudinary(file);
-    room.results = [...(room.results || []), { url, uploadedBy: state.user.uid, at: Date.now() }];
-    await updateDoc(doc(db, "rooms", room.id), { results: room.results });
-    drawResults();
-    toast("Saved!");
+    try {
+      const url = await uploadToCloudinary(file);
+      room.results = [...(room.results || []), { url, uploadedBy: state.user.uid, at: Date.now() }];
+      await updateDoc(doc(db, "rooms", room.id), { results: room.results });
+      drawResults();
+      toast("Saved!");
+    } catch (err) {
+      toast(err.message || "Screenshot upload failed — try again.");
+      console.error("Results upload failed:", err);
+    }
+    e.target.value = "";
   };
   if (room.status === "running") {
     renderConfirmButton(document.getElementById("completeBtnWrap"), room, "completeConfirmed", "Mark Campaign Complete", "completed", "complete");
@@ -1266,15 +1405,23 @@ async function router() {
   clearListeners();
   removeCollapsibleTopbar();
   appEl.classList.remove("no-bottom-nav");
+  shellEl.classList.remove("landing-wide");
 
   if (!state.user) {
     const h = window.location.hash;
     if (h === "#/login") renderLogin("signin");
     else if (h === "#/signup") renderLogin("signup");
+    else if (isInviteableRoute(h)) { savePendingRoute(h); renderInvitePrompt(); }
     else renderLanding();
     return;
   }
   if (!state.business) { renderProfile(); return; }
+
+  // Logged in, profile exists — if an invite link was waiting from before
+  // auth, send them there now instead of the default screen. Consumed once.
+  const pending = peekPendingRoute();
+  if (pending && window.location.hash !== pending) { consumePendingRoute(); go(pending, { replace: true }); return; }
+  if (pending) consumePendingRoute();
 
   const hash = window.location.hash || "#/rooms";
   const partsRaw = hash.replace(/^#\//, "").split("/");
