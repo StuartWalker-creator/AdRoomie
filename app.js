@@ -1094,13 +1094,43 @@ function renderWorkspaceTab(container, room) {
     <input type="file" id="creativeInput" accept="image/*" style="display:none;">
     ${room.status === "confirmed" ? `<div id="launchBtnWrap" style="margin-top:16px;"></div>` : ""}
   `;
-  loadBusiness(otherId).then((b) => {
-    document.getElementById("partnersBlock").innerHTML = `
-      <div class="partner-row">${avatarHTML(state.business, "sm")}
-        <div class="info"><div class="name">${esc(state.business.name)} (You)</div><div class="sub"><span class="active-dot"></span>Active</div></div></div>
-      <div class="partner-row">${avatarHTML(b, "sm")}
-        <div class="info"><div class="name">${esc(b?.name || "Partner")}</div><div class="sub"><span class="active-dot"></span>Active</div></div></div>`;
+  // Render the card skeleton once — self info is known synchronously,
+  // partner info fills in async. Each presence listener below only ever
+  // touches its own small span, never rebuilds the other's, so the two
+  // listeners can't race and clobber each other.
+  document.getElementById("partnersBlock").innerHTML = `
+    <div class="partner-row">${avatarHTML(state.business, "sm")}
+      <div class="info"><div class="name">${esc(state.business.name)} (You)</div><div class="sub" id="selfPresence"><span class="offline-dot"></span>…</div></div></div>
+    <div class="partner-row"><div id="partnerAvatarWrap">${avatarHTML({}, "sm")}</div>
+      <div class="info"><div class="name" id="partnerName">Partner</div><div class="sub" id="partnerPresence"><span class="offline-dot"></span>…</div></div></div>`;
+
+  // Self: listen to your own business doc so the label updates the moment
+  // the heartbeat writes (e.g. right as this screen opens).
+  const unsubSelf = onSnapshot(doc(db, "businesses", state.user.uid), (snap) => {
+    const p = presenceLabel(snap.data()?.lastActiveAt);
+    const el = document.getElementById("selfPresence");
+    if (el) el.innerHTML = `<span class="${p.dot}"></span>${p.text}`;
   });
+  state.unsub.push(unsubSelf);
+
+  // Partner: live listener, not a one-time read, so if they open the app
+  // while you're already viewing this screen, it updates in place instead
+  // of needing a refresh.
+  let partnerCardFilled = false;
+  const unsubPartner = onSnapshot(doc(db, "businesses", otherId), (snap) => {
+    const partnerBiz = snap.exists() ? { id: snap.id, ...snap.data() } : null;
+    if (!partnerCardFilled && partnerBiz) {
+      const wrap = document.getElementById("partnerAvatarWrap");
+      const nameEl = document.getElementById("partnerName");
+      if (wrap) wrap.innerHTML = avatarHTML(partnerBiz, "sm");
+      if (nameEl) nameEl.textContent = partnerBiz.name || "Partner";
+      partnerCardFilled = true;
+    }
+    const p = presenceLabel(partnerBiz?.lastActiveAt);
+    const pEl = document.getElementById("partnerPresence");
+    if (pEl) pEl.innerHTML = `<span class="${p.dot}"></span>${p.text}`;
+  });
+  state.unsub.push(unsubPartner);
   function drawCreatives() {
     document.getElementById("creativesGrid").innerHTML = (room.creatives || []).map((c) => `<img class="creative-thumb" src="${c.url}">`).join("") || "";
   }
@@ -1452,8 +1482,56 @@ onAuthStateChanged(auth, async (user) => {
   state.business = user ? await loadBusiness(user.uid) : null;
   state.isAdmin = user ? await checkIsAdmin(user.uid) : false;
   router();
-  if (user) initOneSignal();
+  if (user) { initOneSignal(); startPresenceHeartbeat(); }
+  else stopPresenceHeartbeat();
 });
+
+// ============================================================
+// Presence — no Realtime Database or Cloud Functions needed. While the app
+// is open and the tab is visible, we periodically stamp the business's own
+// document with a serverTimestamp. Anyone viewing that business can then
+// work out "Active now / Active 5m ago / Offline" purely from how old that
+// timestamp is — cheap (one small write a minute, only while visible) and
+// fits entirely in Firestore's free tier.
+// ============================================================
+let presenceInterval = null;
+let presenceVisibilityHandler = null;
+function startPresenceHeartbeat() {
+  stopPresenceHeartbeat(); // avoid double-registering on repeated auth events
+  const beat = () => {
+    if (!state.user || document.visibilityState !== "visible") return;
+    setDoc(doc(db, "businesses", state.user.uid), { lastActiveAt: serverTimestamp() }, { merge: true }).catch(() => {});
+  };
+  beat();
+  presenceInterval = setInterval(beat, 60000); // every 60s while the tab is open and visible
+  presenceVisibilityHandler = () => { if (document.visibilityState === "visible") beat(); };
+  document.addEventListener("visibilitychange", presenceVisibilityHandler);
+}
+function stopPresenceHeartbeat() {
+  if (presenceInterval) { clearInterval(presenceInterval); presenceInterval = null; }
+  if (presenceVisibilityHandler) { document.removeEventListener("visibilitychange", presenceVisibilityHandler); presenceVisibilityHandler = null; }
+}
+
+// Turns a lastActiveAt Firestore timestamp into a human label + dot color.
+// Thresholds: <2min = live "now", <60min = "Xm ago", <24h = "Xh ago",
+// <7d = "Xd ago", older/missing = "Offline". Nothing here claims certainty
+// beyond what a periodic heartbeat can actually promise — a closed tab looks
+// identical to a dead connection, which is the honest limit of this approach
+// without a real-time presence backend.
+function presenceLabel(lastActiveAt) {
+  if (!lastActiveAt) return { text: "Offline", dot: "offline-dot" };
+  const ms = typeof lastActiveAt.toMillis === "function" ? lastActiveAt.toMillis()
+    : (lastActiveAt.seconds ? lastActiveAt.seconds * 1000 : new Date(lastActiveAt).getTime());
+  if (!ms || Number.isNaN(ms)) return { text: "Offline", dot: "offline-dot" };
+  const minutes = (Date.now() - ms) / 60000;
+  if (minutes < 2) return { text: "Active now", dot: "active-dot" };
+  if (minutes < 60) return { text: `Active ${Math.round(minutes)}m ago`, dot: "away-dot" };
+  const hours = minutes / 60;
+  if (hours < 24) return { text: `Active ${Math.round(hours)}h ago`, dot: "away-dot" };
+  const days = hours / 24;
+  if (days < 7) return { text: `Active ${Math.round(days)}d ago`, dot: "offline-dot" };
+  return { text: "Offline", dot: "offline-dot" };
+}
 
 async function checkIsAdmin(uid) {
   try {
