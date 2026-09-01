@@ -1238,17 +1238,47 @@ function roundRectPath(ctx, x, y, w, h, r) {
   ctx.closePath();
 }
 
-async function generateCombinedAdImage(bizA, bizB, offerText) {
+// Fetches the AI-generated background and returns a loaded <img>, or null if
+// it fails for any reason (not configured, quota, network) — callers should
+// always have a fallback ready rather than treat this as guaranteed to work.
+async function fetchAIBackground(offerText) {
+  try {
+    const res = await fetch("/api/generate-ad-background", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ offer: offerText || "a joint small-business promotion" }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.imageBase64) return null;
+    return await loadImageEl(`data:${data.mimeType || "image/png"};base64,${data.imageBase64}`);
+  } catch (e) {
+    return null;
+  }
+}
+
+async function generateCombinedAdImage(bizA, bizB, offerText, aiBackgroundImg) {
   const size = 1080;
   const canvas = document.createElement("canvas");
   canvas.width = size; canvas.height = size;
   const ctx = canvas.getContext("2d");
 
-  const grad = ctx.createLinearGradient(0, 0, size, size);
-  grad.addColorStop(0, "#5B3FD9");
-  grad.addColorStop(1, "#8B6FF0");
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, size, size);
+  if (aiBackgroundImg) {
+    // Cover-fit the AI background to fill the square exactly, same logic as
+    // the logo circles use, just for the whole canvas.
+    const scale = Math.max(size / aiBackgroundImg.width, size / aiBackgroundImg.height);
+    const w = aiBackgroundImg.width * scale, h = aiBackgroundImg.height * scale;
+    ctx.drawImage(aiBackgroundImg, (size - w) / 2, (size - h) / 2, w, h);
+    // A soft dark wash keeps white logo/name text readable regardless of
+    // what the AI generated underneath it.
+    ctx.fillStyle = "rgba(20,15,50,0.18)";
+    ctx.fillRect(0, 0, size, size);
+  } else {
+    const grad = ctx.createLinearGradient(0, 0, size, size);
+    grad.addColorStop(0, "#5B3FD9");
+    grad.addColorStop(1, "#8B6FF0");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, size, size);
+  }
 
   const [imgA, imgB] = await Promise.all([loadImageEl(bizA?.photoURL), loadImageEl(bizB?.photoURL)]);
 
@@ -1259,11 +1289,13 @@ async function generateCombinedAdImage(bizA, bizB, offerText) {
   ctx.fillStyle = "#fff";
   ctx.font = "bold 56px Arial";
   ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.shadowColor = "rgba(0,0,0,0.35)"; ctx.shadowBlur = 10;
   ctx.fillText("×", size / 2, cy);
 
   ctx.font = "bold 32px Arial";
   ctx.fillText(bizA?.name || "Business A", size / 2 - 160, cy + r + 46);
   ctx.fillText(bizB?.name || "Business B", size / 2 + 160, cy + r + 46);
+  ctx.shadowBlur = 0;
 
   const cardX = 60, cardY = 560, cardW = size - 120, cardH = 380;
   ctx.fillStyle = "rgba(255,255,255,0.96)";
@@ -1281,8 +1313,10 @@ async function generateCombinedAdImage(bizA, bizB, offerText) {
 
   ctx.font = "22px Arial";
   ctx.fillStyle = "#fff";
+  ctx.shadowColor = "rgba(0,0,0,0.35)"; ctx.shadowBlur = 8;
   const footer = [bizA?.location, bizB?.location].filter(Boolean).join("  •  ");
   if (footer) ctx.fillText(footer, size / 2, size - 60);
+  ctx.shadowBlur = 0;
 
   return canvas;
 }
@@ -1290,10 +1324,14 @@ async function generateCombinedAdImage(bizA, bizB, offerText) {
 function openAdImageComposer(room, partnerBiz) {
   showModal(`
     <h3 style="margin:0 0 4px;">🖼️ Combined Ad Image</h3>
-    <p class="hint" style="margin:0 0 14px;">Uses both businesses' profile photos automatically — just add the offer text.</p>
+    <p class="hint" style="margin:0 0 14px;">Both businesses' real logos are placed on top exactly as uploaded — only the background is AI-generated, so logos never get redrawn or distorted.</p>
     <div class="field"><label>Offer / headline text</label>
       <textarea id="imgOfferInput" rows="2" placeholder="e.g. 15% off coffee with any Zziwa haircut receipt"></textarea>
     </div>
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:14px;">
+      <input type="checkbox" id="imgUseAI" checked style="width:16px;height:16px;">
+      Use AI-generated background <span class="hint">(free — unchecking uses a simpler gradient instead, also free, just less unique)</span>
+    </label>
     <button class="btn btn-primary" id="imgGenerateBtn" style="width:100%;"><i class="fa-solid fa-image"></i> Generate Image</button>
     <div id="imgResultWrap" style="margin-top:14px;"></div>
     <button class="btn btn-outline" id="imgCloseBtn" style="width:100%;margin-top:10px;">Close</button>
@@ -1301,12 +1339,20 @@ function openAdImageComposer(room, partnerBiz) {
   document.getElementById("imgCloseBtn").onclick = closeModal;
   document.getElementById("imgGenerateBtn").onclick = async () => {
     const offerText = document.getElementById("imgOfferInput").value.trim();
+    const useAI = document.getElementById("imgUseAI").checked;
     const btn = document.getElementById("imgGenerateBtn");
-    btn.disabled = true; btn.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> Generating...`;
+    btn.disabled = true; btn.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> ${useAI ? "Designing background..." : "Generating..."}`;
     try {
-      const canvas = await generateCombinedAdImage(state.business, partnerBiz, offerText);
+      let aiBg = null;
+      let usedFallback = false;
+      if (useAI) {
+        aiBg = await fetchAIBackground(offerText);
+        usedFallback = !aiBg;
+      }
+      const canvas = await generateCombinedAdImage(state.business, partnerBiz, offerText, aiBg);
       const dataUrl = canvas.toDataURL("image/png");
       document.getElementById("imgResultWrap").innerHTML = `
+        ${usedFallback ? `<p class="hint" style="color:var(--warn);margin-bottom:8px;">AI background wasn't available right now, so this uses the simple gradient instead — your logos are unaffected.</p>` : ""}
         <img src="${dataUrl}" style="width:100%;border-radius:12px;margin-bottom:10px;" alt="Combined ad image">
         <a class="btn btn-primary" id="imgDownloadBtn" style="width:100%;display:block;text-align:center;text-decoration:none;box-sizing:border-box;" href="${dataUrl}" download="adroomie-${room.id}.png"><i class="fa-solid fa-download"></i> Download PNG</a>
       `;
