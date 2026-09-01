@@ -1131,7 +1131,7 @@ function openCaptionGenerator(room, partnerBiz) {
     const btn = document.getElementById("capGenerateBtn");
     btn.disabled = true; btn.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> Generating...`;
     try {
-      const res = await fetch("/.netlify/functions/generate-caption", {
+      const res = await fetch("https://adroomie.netlify.app/.netlify/functions/generate-caption", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1245,7 +1245,7 @@ function roundRectPath(ctx, x, y, w, h, r) {
 // "nothing happened" impossible to diagnose from the outside.
 async function fetchAIBackground(offerText, bizA, bizB) {
   try {
-    const res = await fetch("/.netlify/functions/generate-campaign-art", {
+    const res = await fetch("https://adroomie.netlify.app/.netlify/functions/generate-campaign-art", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
