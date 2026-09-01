@@ -1243,7 +1243,7 @@ function roundRectPath(ctx, x, y, w, h, r) {
 // always have a fallback ready rather than treat this as guaranteed to work.
 async function fetchAIBackground(offerText) {
   try {
-    const res = await fetch("/api/generate-ad-background", {
+    const res = await fetch("https:/adroomie.netlify.app/.netlify/functions/generate-ad-background", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ offer: offerText || "a joint small-business promotion" }),

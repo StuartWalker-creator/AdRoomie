@@ -13,7 +13,7 @@
 // https://ai.google.dev/gemini-api/docs/pricing and update MODEL below.
 // --------------------------------------------------
 
-const MODEL = "gemini-2.0-flash";
+const MODEL = "gemini-3.6-flash";
 
 exports.handler = async (event) => {
   if (event.httpMethod !== "POST") {
