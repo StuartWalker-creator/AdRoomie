@@ -1131,7 +1131,7 @@ function openCaptionGenerator(room, partnerBiz) {
     const btn = document.getElementById("capGenerateBtn");
     btn.disabled = true; btn.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> Generating...`;
     try {
-      const res = await fetch("https://adroomie.netlify.app/.netlify/functions/generate-caption", {
+      const res = await fetch("/.netlify/functions/generate-caption", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1241,17 +1241,32 @@ function roundRectPath(ctx, x, y, w, h, r) {
 // Fetches the AI-generated background and returns a loaded <img>, or null if
 // it fails for any reason (not configured, quota, network) — callers should
 // always have a fallback ready rather than treat this as guaranteed to work.
-async function fetchAIBackground(offerText) {
+// Logs the real reason to the console either way, since a silent null makes
+// "nothing happened" impossible to diagnose from the outside.
+async function fetchAIBackground(offerText, bizA, bizB) {
   try {
-    const res = await fetch("https://adroomie.netlify.app/.netlify/functions/generate-ad-background", {
+    const res = await fetch("/.netlify/functions/generate-campaign-art", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ offer: offerText || "a joint small-business promotion" }),
+      body: JSON.stringify({
+        offer: offerText || "a joint small-business promotion",
+        // Names/categories are plain text — safe to pass along so the
+        // background can reflect what these businesses actually are (e.g.
+        // coffee-shop vs. salon tones), unlike logos, which are never sent.
+        businessA: bizA?.name || null,
+        businessB: bizB?.name || null,
+        categoryA: bizA?.category || null,
+        categoryB: bizB?.category || null,
+      }),
     });
     const data = await res.json().catch(() => null);
-    if (!res.ok || !data?.imageBase64) return null;
+    if (!res.ok || !data?.imageBase64) {
+      console.warn("AI background unavailable:", data?.error || `HTTP ${res.status}`);
+      return null;
+    }
     return await loadImageEl(`data:${data.mimeType || "image/png"};base64,${data.imageBase64}`);
   } catch (e) {
+    console.warn("AI background request failed:", e);
     return null;
   }
 }
@@ -1338,15 +1353,15 @@ function openAdImageComposer(room, partnerBiz) {
   `);
   document.getElementById("imgCloseBtn").onclick = closeModal;
   document.getElementById("imgGenerateBtn").onclick = async () => {
-    const offerText = document.getElementById("imgOfferInput").value.trim();
-    const useAI = document.getElementById("imgUseAI").checked;
     const btn = document.getElementById("imgGenerateBtn");
-    btn.disabled = true; btn.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> ${useAI ? "Designing background..." : "Generating..."}`;
     try {
+      const offerText = document.getElementById("imgOfferInput").value.trim();
+      const useAI = document.getElementById("imgUseAI").checked;
+      btn.disabled = true; btn.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> ${useAI ? "Designing background..." : "Generating..."}`;
       let aiBg = null;
       let usedFallback = false;
       if (useAI) {
-        aiBg = await fetchAIBackground(offerText);
+        aiBg = await fetchAIBackground(offerText, state.business, partnerBiz);
         usedFallback = !aiBg;
       }
       const canvas = await generateCombinedAdImage(state.business, partnerBiz, offerText, aiBg);

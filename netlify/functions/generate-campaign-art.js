@@ -7,6 +7,13 @@
 // to chance. Keeping logos out of the prompt entirely removes that risk
 // completely, while still getting a genuinely AI-designed background.
 //
+// NAMED THIS "generate-campaign-art", NOT "...ad-background": deliberately
+// avoids the substring "ad-" in the URL. Ad-blockers commonly pattern-match
+// and silently drop any request whose path contains "ad-" or "/ads/",
+// assuming it's an advertisement or tracker — which produces exactly the
+// symptom of "no response, no error, nothing in the network tab at all."
+// Don't rename this back to anything containing "ad-".
+//
 // COST: $0. This uses Cloudflare Workers AI first — a real, recurring daily
 // free allowance (not a one-time trial credit), no card required, ever. If
 // that's not configured yet, or its daily free budget is used up, it falls
@@ -34,8 +41,10 @@
 
 const CF_MODEL = "@cf/black-forest-labs/flux-1-schnell";
 
-function buildPrompt(offer, mood) {
-  return `Vibrant, modern square social-media ad background for a small-business joint promotion. Theme/mood: ${mood || "warm, inviting, purple-and-violet gradient tones, upbeat"}. Visual inspiration only, do not render any text: ${offer}. Purely decorative — abstract shapes, soft gradients, subtle texture. No people's faces, no readable text, no logos, no brand names anywhere. Keep the center-left and center-right areas calm and low-detail, reserved for logos to be placed on top afterward. Keep the lower third simple and uncluttered for a text card to sit on top later. Professional, attractive, high quality — not generic stock-photo clipart.`;
+function buildPrompt(offer, mood, businessA, businessB, categoryA, categoryB) {
+  const bizContext = [businessA, businessB].filter(Boolean).join(" and ");
+  const categoryContext = [categoryA, categoryB].filter(Boolean).join(", ");
+  return `Vibrant, modern square social-media ad background for a small-business joint promotion${bizContext ? ` between ${bizContext}` : ""}${categoryContext ? ` (${categoryContext})` : ""}. Theme/mood: ${mood || "warm, inviting, purple-and-violet gradient tones, upbeat"}. Let the businesses' nature genuinely inspire the visual motifs and colors used. Visual inspiration only, do not render any text: ${offer}. Purely decorative — abstract shapes, soft gradients, subtle texture, or thematically relevant lifestyle imagery. No people's faces, no readable text, no logos, no brand names anywhere — those are added separately afterward. Keep the center-left and center-right areas calm and low-detail, reserved for logos to be placed on top afterward. Keep the lower third simple and uncluttered for a text card to sit on top later. Professional, attractive, high quality — not generic stock-photo clipart.`;
 }
 
 exports.handler = async (event) => {
@@ -50,12 +59,12 @@ exports.handler = async (event) => {
     return { statusCode: 400, body: JSON.stringify({ error: "Invalid request." }) };
   }
 
-  const { offer, mood } = payload || {};
+  const { offer, mood, businessA, businessB, categoryA, categoryB } = payload || {};
   if (!offer) {
     return { statusCode: 400, body: JSON.stringify({ error: "Missing offer details." }) };
   }
 
-  const prompt = buildPrompt(offer, mood);
+  const prompt = buildPrompt(offer, mood, businessA, businessB, categoryA, categoryB);
 
   // ---- Try 1: Cloudflare Workers AI — real free daily allowance ----
   const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
