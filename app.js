@@ -1131,7 +1131,7 @@ function openCaptionGenerator(room, partnerBiz) {
     const btn = document.getElementById("capGenerateBtn");
     btn.disabled = true; btn.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> Generating...`;
     try {
-      const res = await fetch("/api/generate-caption", {
+      const res = await fetch("https://adroomie.netlify.app/.netlify/functions/generate-caption", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
