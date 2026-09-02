@@ -1,17 +1,11 @@
 // Generates a decorative BACKGROUND ONLY for the combined ad image — no
 // logos, no brand marks, nothing that needs to stay pixel-accurate. The
-// client composites each business's real, untouched logo on top afterward,
-// at the exact coordinates this prompt asks the model to leave clear.
-//
-// HONEST EXPECTATION: fast, free diffusion models (FLUX-schnell, whatever
-// Pollinations is running) are meaningfully weaker at precisely following
-// spatial layout instructions than a large model like GPT's image generator
-// or DALL-E 3 — this prompt gives it the best possible shot (explicit
-// percentages, professional-designer framing) but may not perfectly honor
-// the blank zones every time. That's a real, known gap between free/fast
-// and paid/precise models, not a prompt-wording problem to keep tweaking
-// forever. This is offered as an optional try-it-and-see path in the UI —
-// the deterministic Canvas template is the reliable fallback either way.
+// client composites each business's real, untouched logo on top afterward.
+// This split is deliberate: image-generation models are good at not
+// mangling a reference logo, but "good" isn't "pixel-perfect," and a
+// business's actual brand mark is exactly the thing that shouldn't be left
+// to chance. Keeping logos out of the prompt entirely removes that risk
+// completely, while still getting a genuinely AI-designed background.
 //
 // NAMED THIS "generate-campaign-art", NOT "...ad-background": deliberately
 // avoids the substring "ad-" in the URL. Ad-blockers commonly pattern-match
@@ -47,31 +41,10 @@
 
 const CF_MODEL = "@cf/black-forest-labs/flux-1-schnell";
 
-// These percentages are NOT arbitrary — they're computed directly from the
-// same constants generateCombinedAdImage() in app.js uses to place the real
-// logos (midX ± 240, cy = 400, r = 118, on a 1080px canvas). If those values
-// ever change, update the numbers below to match, or the "blank zones" this
-// prompt asks for won't line up with where the logos actually land.
-const LOGO_ZONE_LEFT_X_PCT = 28;   // (540-240)/1080
-const LOGO_ZONE_RIGHT_X_PCT = 72;  // (540+240)/1080
-const LOGO_ZONE_Y_PCT = 37;        // 400/1080
-const LOGO_ZONE_DIAMETER_PCT = 22; // (118*2)/1080
-
-function buildPrompt(offer, businessA, businessB, categoryA, categoryB) {
-  const bizLine = [businessA, businessB].filter(Boolean).join(" and ");
-  const catLine = [categoryA, categoryB].filter(Boolean).join(", ");
-  return `You are a professional graphic designer and digital marketer. Design a high-quality, visually striking square (1:1) promotional background for a joint ad campaign between two collaborating small businesses${bizLine ? `: ${bizLine}` : ""}${catLine ? ` (${catLine})` : ""}.
-
-Campaign offer — for thematic inspiration only, do not render this text or any text in the image: "${offer}"
-
-Design requirements:
-- Reflect the genuine spirit and vibe of these specific businesses and this offer through color, mood, and abstract or lifestyle-adjacent imagery. Professional and on-brand, not generic stock art.
-- Leave TWO clear, simple, low-detail circular blank zones, reserved for real business logos to be placed on top afterward — these zones must stay visually calm (soft solid color or gentle blur, no busy detail) so a logo placed there stays legible:
-  - Zone 1: centered at ${LOGO_ZONE_LEFT_X_PCT}% from the left edge, ${LOGO_ZONE_Y_PCT}% from the top, diameter ${LOGO_ZONE_DIAMETER_PCT}% of the image width.
-  - Zone 2: centered at ${LOGO_ZONE_RIGHT_X_PCT}% from the left edge, ${LOGO_ZONE_Y_PCT}% from the top, diameter ${LOGO_ZONE_DIAMETER_PCT}% of the image width.
-- Keep the lower third of the image simple and uncluttered — a text card is placed there afterward.
-- Absolutely NO text, letters, numbers, words, logos, or brand marks anywhere in the image — those are added separately, afterward, by a different process.
-- High-end, professional composition — the kind of background a skilled human designer would hand off ready for a marketing team to drop logos and copy onto, not a busy or cluttered scene.`;
+function buildPrompt(offer, mood, businessA, businessB, categoryA, categoryB) {
+  const bizContext = [businessA, businessB].filter(Boolean).join(" and ");
+  const categoryContext = [categoryA, categoryB].filter(Boolean).join(", ");
+  return `Vibrant, modern square social-media ad background for a small-business joint promotion${bizContext ? ` between ${bizContext}` : ""}${categoryContext ? ` (${categoryContext})` : ""}. Theme/mood: ${mood || "warm, inviting, purple-and-violet gradient tones, upbeat"}. Let the businesses' nature genuinely inspire the visual motifs and colors used. Visual inspiration only, do not render any text: ${offer}. Purely decorative — abstract shapes, soft gradients, subtle texture, or thematically relevant lifestyle imagery. No people's faces, no readable text, no logos, no brand names anywhere — those are added separately afterward. Keep the center-left and center-right areas calm and low-detail, reserved for logos to be placed on top afterward. Keep the lower third simple and uncluttered for a text card to sit on top later. Professional, attractive, high quality — not generic stock-photo clipart.`;
 }
 
 exports.handler = async (event) => {
@@ -86,12 +59,12 @@ exports.handler = async (event) => {
     return { statusCode: 400, body: JSON.stringify({ error: "Invalid request." }) };
   }
 
-  const { offer, businessA, businessB, categoryA, categoryB } = payload || {};
+  const { offer, mood, businessA, businessB, categoryA, categoryB } = payload || {};
   if (!offer) {
     return { statusCode: 400, body: JSON.stringify({ error: "Missing offer details." }) };
   }
 
-  const prompt = buildPrompt(offer, businessA, businessB, categoryA, categoryB);
+  const prompt = buildPrompt(offer, mood, businessA, businessB, categoryA, categoryB);
 
   // ---- Try 1: Cloudflare Workers AI — real free daily allowance ----
   const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;

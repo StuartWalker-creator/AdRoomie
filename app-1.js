@@ -1131,7 +1131,7 @@ function openCaptionGenerator(room, partnerBiz) {
     const btn = document.getElementById("capGenerateBtn");
     btn.disabled = true; btn.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> Generating...`;
     try {
-      const res = await fetch("/.netlify/functions/generate-caption", {
+      const res = await fetch("https://adroomie.netlify.app/.netlify/functions/generate-caption", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1167,16 +1167,12 @@ function openCaptionGenerator(room, partnerBiz) {
 
 // ============================================================
 // Combined Ad Image — a client-side Canvas composite, not an AI image
-// generator. This is deliberate: an image-generation model illustrating
-// "Wolf Gadgets" literally draws a wolf, and "Stuart Web Dev" gets a random
-// sports car — it doesn't understand a business name as a name, it just
-// pattern-matches the words. Worse, no model reliably produces a precisely
-// laid-out graphic (exact icons, readable small text, a real address) —
-// that's structured design, not generative art, and no text-to-image model
-// does that well, free or paid. So instead: real uploaded logos where a
-// business has one, a category-matched icon/color theme where it doesn't,
-// and only real data (names, category, the actual offer text, real
-// redemption codes) — nothing guessed, nothing hallucinated.
+// generator. Deliberate choice: image-generation models are notoriously bad
+// at reproducing a specific real logo accurately (they redraw/distort it,
+// misspell text), so a template using each business's ACTUAL uploaded
+// profile photo is both more reliable and completely free — no per-image API
+// cost, fits the free-tier constraint. If a business has no profile photo,
+// it falls back to the same initials-avatar style used elsewhere in the app.
 // ============================================================
 function genRedemptionCode(name) {
   const base = (name || "PARTNER").replace(/[^a-zA-Z]/g, "").slice(0, 8).toUpperCase();
@@ -1194,35 +1190,7 @@ function loadImageEl(url) {
   });
 }
 
-// Maps a business's stored `category` text to a themed color + emoji icon,
-// used only when that business has no uploaded logo. Simple substring
-// matching against real category keywords — never guesses at content the
-// business didn't actually provide.
-function categoryTheme(category) {
-  const c = (category || "").toLowerCase();
-  const themes = [
-    { keys: ["coffee", "cafe", "café"], color: "#5C3A21", icon: "☕" },
-    { keys: ["bakery", "bake", "cake", "pastry"], color: "#A8551F", icon: "🧁" },
-    { keys: ["restaurant", "food", "grill", "kitchen"], color: "#B5651D", icon: "🍽️" },
-    { keys: ["salon", "beauty", "spa", "hair", "barber"], color: "#8A3556", icon: "💇" },
-    { keys: ["boutique", "fashion", "cloth", "wear", "tailor"], color: "#6B4A9E", icon: "👗" },
-    { keys: ["book", "stationery", "print"], color: "#2D5940", icon: "📚" },
-    { keys: ["gym", "fitness", "fit"], color: "#1F5C56", icon: "💪" },
-    { keys: ["hardware", "construction", "build"], color: "#5C4A33", icon: "🔨" },
-    { keys: ["furniture"], color: "#7A5A2E", icon: "🛋️" },
-    { keys: ["electr", "tech", "phone", "gadget"], color: "#2A4E8C", icon: "📱" },
-    { keys: ["pharmac", "medic", "clinic", "hospital", "health"], color: "#1F7A5C", icon: "⚕️" },
-    { keys: ["supermarket", "grocery", "shop", "store"], color: "#8C6A1F", icon: "🛒" },
-    { keys: ["guest", "hotel", "lodge"], color: "#383A7A", icon: "🛏️" },
-  ];
-  for (const t of themes) {
-    if (t.keys.some((k) => c.includes(k))) return t;
-  }
-  return { color: "#5B3FD9", icon: "🏪" }; // brand-purple default when category doesn't match a keyword
-}
-
-function drawCircleLogo(ctx, img, business, cx, cy, r) {
-  const theme = categoryTheme(business?.category);
+function drawCircleLogo(ctx, img, name, cx, cy, r) {
   ctx.save();
   ctx.beginPath();
   ctx.arc(cx, cy, r, 0, Math.PI * 2);
@@ -1233,20 +1201,18 @@ function drawCircleLogo(ctx, img, business, cx, cy, r) {
     const w = img.width * scale, h = img.height * scale;
     ctx.drawImage(img, cx - w / 2, cy - h / 2, w, h);
   } else {
-    // No uploaded logo — use the category-matched color + emoji instead of
-    // guessing, so this still looks intentional rather than blank.
-    ctx.fillStyle = theme.color;
+    ctx.fillStyle = "#5B3FD9";
     ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
-    ctx.font = `${Math.round(r * 0.85)}px Arial`;
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 48px Arial";
     ctx.textAlign = "center"; ctx.textBaseline = "middle";
-    ctx.fillText(theme.icon, cx, cy + r * 0.05);
+    ctx.fillText(initials(name), cx, cy);
   }
   ctx.restore();
   ctx.beginPath();
   ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.lineWidth = 7; ctx.strokeStyle = "#FBF8F2";
+  ctx.lineWidth = 6; ctx.strokeStyle = "#fff";
   ctx.stroke();
-  return theme;
 }
 
 function wrapTextCentered(ctx, text, centerX, y, maxWidth, lineHeight) {
@@ -1260,7 +1226,6 @@ function wrapTextCentered(ctx, text, centerX, y, maxWidth, lineHeight) {
   }
   if (line) lines.push(line);
   lines.forEach((l, i) => ctx.fillText(l, centerX, y + i * lineHeight));
-  return lines.length;
 }
 
 function roundRectPath(ctx, x, y, w, h, r) {
@@ -1273,124 +1238,21 @@ function roundRectPath(ctx, x, y, w, h, r) {
   ctx.closePath();
 }
 
-async function generateCombinedAdImage(bizA, bizB, offerText, tracker, aiBackgroundImg) {
-  const size = 1080;
-  const canvas = document.createElement("canvas");
-  canvas.width = size; canvas.height = size;
-  const ctx = canvas.getContext("2d");
-  const cream = "#FBF8F2";
-  const midX = size / 2;
-
-  if (aiBackgroundImg) {
-    // AI path: the model was asked to leave two blank zones at the exact
-    // coordinates the logo circles below use, and to design everything
-    // else itself — so unlike the template path, we do NOT draw the
-    // chevron/cream shapes here, just cover-fit the AI art as the whole
-    // background and layer the same logo/text elements on top of it.
-    const scale = Math.max(size / aiBackgroundImg.width, size / aiBackgroundImg.height);
-    const w = aiBackgroundImg.width * scale, h = aiBackgroundImg.height * scale;
-    ctx.drawImage(aiBackgroundImg, (size - w) / 2, (size - h) / 2, w, h);
-    // Soft dark wash so white name/footer text stays legible regardless of
-    // what the AI generated underneath it.
-    ctx.fillStyle = "rgba(20,15,50,0.15)";
-    ctx.fillRect(0, 0, size, size);
-  } else {
-    // Template path: deterministic chevron split, guaranteed to look
-    // intentional every time, no matter what the businesses are.
-    const themeA = categoryTheme(bizA?.category);
-    const themeB = categoryTheme(bizB?.category);
-    if (themeA.color === themeB.color) themeB.color = "#3A3560"; // rare same-category collision — keep the two sides visually distinct
-
-    const edgeY = 190, apexY = 380;
-    ctx.fillStyle = cream;
-    ctx.fillRect(0, 0, size, size);
-
-    ctx.fillStyle = themeA.color;
-    ctx.beginPath();
-    ctx.moveTo(0, edgeY); ctx.lineTo(midX, apexY); ctx.lineTo(midX, size); ctx.lineTo(0, size);
-    ctx.closePath(); ctx.fill();
-
-    ctx.fillStyle = themeB.color;
-    ctx.beginPath();
-    ctx.moveTo(size, edgeY); ctx.lineTo(midX, apexY); ctx.lineTo(midX, size); ctx.lineTo(size, size);
-    ctx.closePath(); ctx.fill();
-
-    ctx.fillStyle = "#333";
-    ctx.font = "700 22px Arial";
-    ctx.textAlign = "center"; ctx.textBaseline = "middle";
-    ctx.fillText("TWO LOCAL FAVORITES", midX, 78);
-    ctx.fillStyle = "#1e1e2a";
-    ctx.font = "800 52px Arial";
-    ctx.fillText("Better together.", midX, 132);
-
-    ctx.fillStyle = cream;
-    ctx.font = "34px Arial";
-    ctx.fillText("♥", midX, apexY - 10);
-  }
-
-  // ---- Logo circles — same coordinates whichever path was taken above, so
-  // they land exactly where the AI prompt was told to leave space clear. ----
-  ctx.textAlign = "center"; ctx.textBaseline = "middle";
-  const [imgA, imgB] = await Promise.all([loadImageEl(bizA?.photoURL), loadImageEl(bizB?.photoURL)]);
-  const r = 118, cy = 400;
-  drawCircleLogo(ctx, imgA, bizA, midX - 240, cy, r);
-  drawCircleLogo(ctx, imgB, bizB, midX + 240, cy, r);
-
-  ctx.fillStyle = "#fff";
-  ctx.font = "700 30px Arial";
-  ctx.shadowColor = aiBackgroundImg ? "rgba(0,0,0,0.5)" : "transparent"; ctx.shadowBlur = aiBackgroundImg ? 8 : 0;
-  ctx.fillText(bizA?.name || "Business A", midX - 240, cy + r + 44);
-  ctx.fillText(bizB?.name || "Business B", midX + 240, cy + r + 44);
-  ctx.shadowBlur = 0;
-
-  // ---- Offer card — the real, accurate content, not a fabricated tagline ----
-  const cardW = size - 140, cardH = 260, cardX = (size - cardW) / 2, cardY = 600;
-  ctx.fillStyle = "rgba(255,255,255,0.97)";
-  roundRectPath(ctx, cardX, cardY, cardW, cardH, 22);
-  ctx.fill();
-
-  ctx.fillStyle = "#1e1e2a";
-  ctx.font = "800 30px Arial";
-  ctx.fillText("This week's joint offer", midX, cardY + 46);
-
-  ctx.font = "26px Arial";
-  ctx.fillStyle = "#333";
-  wrapTextCentered(ctx, offerText || "Ask either business about this partnership!", midX, cardY + 92, cardW - 70, 34);
-
-  // ---- Redemption codes, only if tracking has actually been set up (real
-  // data only — never fabricates a code that doesn't exist yet) ----
-  if (tracker?.codes) {
-    ctx.font = "600 20px Arial";
-    ctx.fillStyle = "#5B3FD9";
-    const codeLine = `Use ${tracker.codes[Object.keys(tracker.codes)[0]]} or ${tracker.codes[Object.keys(tracker.codes)[1]]} to claim`;
-    ctx.fillText(codeLine, midX, cardY + cardH - 34);
-  }
-
-  // ---- Footer ----
-  ctx.font = "500 22px Arial";
-  ctx.fillStyle = "#fff";
-  ctx.shadowColor = "rgba(0,0,0,0.3)"; ctx.shadowBlur = 6;
-  const footer = [bizA?.location, bizB?.location].filter(Boolean).join("   •   ");
-  if (footer) ctx.fillText(footer, midX, size - 44);
-  ctx.shadowBlur = 0;
-
-  return canvas;
-}
-
 // Fetches the AI-generated background and returns a loaded <img>, or null if
-// it fails for any reason (not configured, quota, network) — the caller
-// falls back to the deterministic template rather than treat this as
-// guaranteed. Logs the real reason either way, since a silent null makes
+// it fails for any reason (not configured, quota, network) — callers should
+// always have a fallback ready rather than treat this as guaranteed to work.
+// Logs the real reason to the console either way, since a silent null makes
 // "nothing happened" impossible to diagnose from the outside.
 async function fetchAIBackground(offerText, bizA, bizB) {
   try {
-    const res = await fetch("/.netlify/functions/generate-campaign-art", {
+    const res = await fetch("https://adroomie.netlify.app/.netlify/functions/generate-campaign-art", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         offer: offerText || "a joint small-business promotion",
-        // Names/categories are plain text — safe to pass along, unlike
-        // logos, which are never sent anywhere near this call.
+        // Names/categories are plain text — safe to pass along so the
+        // background can reflect what these businesses actually are (e.g.
+        // coffee-shop vs. salon tones), unlike logos, which are never sent.
         businessA: bizA?.name || null,
         businessB: bizB?.name || null,
         categoryA: bizA?.category || null,
@@ -1409,18 +1271,82 @@ async function fetchAIBackground(offerText, bizA, bizB) {
   }
 }
 
+async function generateCombinedAdImage(bizA, bizB, offerText, aiBackgroundImg) {
+  const size = 1080;
+  const canvas = document.createElement("canvas");
+  canvas.width = size; canvas.height = size;
+  const ctx = canvas.getContext("2d");
+
+  if (aiBackgroundImg) {
+    // Cover-fit the AI background to fill the square exactly, same logic as
+    // the logo circles use, just for the whole canvas.
+    const scale = Math.max(size / aiBackgroundImg.width, size / aiBackgroundImg.height);
+    const w = aiBackgroundImg.width * scale, h = aiBackgroundImg.height * scale;
+    ctx.drawImage(aiBackgroundImg, (size - w) / 2, (size - h) / 2, w, h);
+    // A soft dark wash keeps white logo/name text readable regardless of
+    // what the AI generated underneath it.
+    ctx.fillStyle = "rgba(20,15,50,0.18)";
+    ctx.fillRect(0, 0, size, size);
+  } else {
+    const grad = ctx.createLinearGradient(0, 0, size, size);
+    grad.addColorStop(0, "#5B3FD9");
+    grad.addColorStop(1, "#8B6FF0");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, size, size);
+  }
+
+  const [imgA, imgB] = await Promise.all([loadImageEl(bizA?.photoURL), loadImageEl(bizB?.photoURL)]);
+
+  const r = 130, cy = 300;
+  drawCircleLogo(ctx, imgA, bizA?.name, size / 2 - 160, cy, r);
+  drawCircleLogo(ctx, imgB, bizB?.name, size / 2 + 160, cy, r);
+
+  ctx.fillStyle = "#fff";
+  ctx.font = "bold 56px Arial";
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.shadowColor = "rgba(0,0,0,0.35)"; ctx.shadowBlur = 10;
+  ctx.fillText("×", size / 2, cy);
+
+  ctx.font = "bold 32px Arial";
+  ctx.fillText(bizA?.name || "Business A", size / 2 - 160, cy + r + 46);
+  ctx.fillText(bizB?.name || "Business B", size / 2 + 160, cy + r + 46);
+  ctx.shadowBlur = 0;
+
+  const cardX = 60, cardY = 560, cardW = size - 120, cardH = 380;
+  ctx.fillStyle = "rgba(255,255,255,0.96)";
+  roundRectPath(ctx, cardX, cardY, cardW, cardH, 24);
+  ctx.fill();
+
+  ctx.fillStyle = "#1e1e2a";
+  ctx.font = "bold 40px Arial";
+  ctx.textAlign = "center";
+  ctx.fillText("Better together.", size / 2, cardY + 70);
+
+  ctx.font = "27px Arial";
+  ctx.fillStyle = "#333";
+  wrapTextCentered(ctx, offerText || "Ask us about this week's joint offer!", size / 2, cardY + 145, cardW - 60, 38);
+
+  ctx.font = "22px Arial";
+  ctx.fillStyle = "#fff";
+  ctx.shadowColor = "rgba(0,0,0,0.35)"; ctx.shadowBlur = 8;
+  const footer = [bizA?.location, bizB?.location].filter(Boolean).join("  •  ");
+  if (footer) ctx.fillText(footer, size / 2, size - 60);
+  ctx.shadowBlur = 0;
+
+  return canvas;
+}
+
 function openAdImageComposer(room, partnerBiz) {
   showModal(`
     <h3 style="margin:0 0 4px;">🖼️ Combined Ad Image</h3>
-    <p class="hint" style="margin:0 0 14px;">Both businesses' real logos are placed on top exactly as uploaded, either way — only the background style changes below.</p>
+    <p class="hint" style="margin:0 0 14px;">Both businesses' real logos are placed on top exactly as uploaded — only the background is AI-generated, so logos never get redrawn or distorted.</p>
     <div class="field"><label>Offer / headline text</label>
       <textarea id="imgOfferInput" rows="2" placeholder="e.g. 15% off coffee with any Zziwa haircut receipt"></textarea>
     </div>
-    <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:6px;">
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:14px;">
       <input type="checkbox" id="imgUseAI" checked style="width:16px;height:16px;">
-      Try AI-generated background <span class="hint">(free, but a fast free model — may not always follow the layout perfectly)</span>
+      Use AI-generated background <span class="hint">(free — unchecking uses a simpler gradient instead, also free, just less unique)</span>
     </label>
-    <p class="hint" style="margin:0 0 14px;">If unchecked, or if the AI result doesn't come back usable, this uses the reliable template design instead — never a blank result.</p>
     <button class="btn btn-primary" id="imgGenerateBtn" style="width:100%;"><i class="fa-solid fa-image"></i> Generate Image</button>
     <div id="imgResultWrap" style="margin-top:14px;"></div>
     <button class="btn btn-outline" id="imgCloseBtn" style="width:100%;margin-top:10px;">Close</button>
@@ -1432,15 +1358,16 @@ function openAdImageComposer(room, partnerBiz) {
       const offerText = document.getElementById("imgOfferInput").value.trim();
       const useAI = document.getElementById("imgUseAI").checked;
       btn.disabled = true; btn.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> ${useAI ? "Designing background..." : "Generating..."}`;
-      let aiBg = null, usedFallback = false;
+      let aiBg = null;
+      let usedFallback = false;
       if (useAI) {
         aiBg = await fetchAIBackground(offerText, state.business, partnerBiz);
         usedFallback = !aiBg;
       }
-      const canvas = await generateCombinedAdImage(state.business, partnerBiz, offerText, room.tracker, aiBg);
+      const canvas = await generateCombinedAdImage(state.business, partnerBiz, offerText, aiBg);
       const dataUrl = canvas.toDataURL("image/png");
       document.getElementById("imgResultWrap").innerHTML = `
-        ${usedFallback ? `<p class="hint" style="color:var(--warn);margin-bottom:8px;">AI background wasn't available this time, so this uses the reliable template instead.</p>` : ""}
+        ${usedFallback ? `<p class="hint" style="color:var(--warn);margin-bottom:8px;">AI background wasn't available right now, so this uses the simple gradient instead — your logos are unaffected.</p>` : ""}
         <img src="${dataUrl}" style="width:100%;border-radius:12px;margin-bottom:10px;" alt="Combined ad image">
         <a class="btn btn-primary" id="imgDownloadBtn" style="width:100%;display:block;text-align:center;text-decoration:none;box-sizing:border-box;" href="${dataUrl}" download="adroomie-${room.id}.png"><i class="fa-solid fa-download"></i> Download PNG</a>
       `;
