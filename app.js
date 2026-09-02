@@ -39,6 +39,8 @@ const ONESIGNAL_APP_ID = "a0bcdf64-4d1a-4360-bc6e-1e01d14c6e5f";
 const ADMIN_UID = "SLIWNQz3e3hGPKMzGhfrTgMUFve2";
 // ---------------------------------------------------------
 
+const domain = window.location.origin
+
 const CATEGORY_OPTIONS = ["Restaurant / Cafe","Bakery","Fitness / Health","Retail","Electronics/Gadgets","Homeware","Education","Beauty & Wellness","Services","Other"];
 const BUDGET_OPTIONS = ["UGX 100,000 - 300,000","UGX 300,000 - 500,000","UGX 500,000 - 800,000","UGX 800,000+"];
 const DURATION_OPTIONS = ["1 week","2 weeks","1 month"];
@@ -676,6 +678,8 @@ function renderMyRooms() {
   state.unsub.push(onSnapshot(qCreated, (s) => { created = s.docs.map((d) => ({ id: d.id, ...d.data() })); draw(); }));
   state.unsub.push(onSnapshot(qJoined, (s) => { joined = s.docs.map((d) => ({ id: d.id, ...d.data() })); draw(); }));
 }
+console.log(domain)
+
 
 // ============================================================
 // Screen: Explore — browse open rooms posted by others
@@ -1079,7 +1083,7 @@ function renderChatTab(container, room) {
   document.getElementById("attachBtn").onclick = () => document.getElementById("fileInput").click();
   document.getElementById("aiCaptionBtn").onclick = async () => {
     const partnerBiz = partnerIdField ? await loadBusiness(partnerIdField) : null;
-    openCaptionGenerator(room, partnerBiz);
+    openCaptionGenerator(room, partnerBiz, partnerIdField);
   };
   document.getElementById("fileInput").onchange = async (e) => {
     const file = e.target.files[0]; if (!file) return;
@@ -1100,6 +1104,7 @@ function renderChatTab(container, room) {
   }
 }
 
+
 // ============================================================
 // AI Caption Generator — calls a Netlify function (netlify/functions/
 // generate-caption.js) which itself calls Google's Gemini API. Requires a
@@ -1107,7 +1112,25 @@ function renderChatTab(container, room) {
 // function file. Nothing here breaks if it's not configured yet; the error
 // just surfaces in the modal instead of a caption.
 // ============================================================
-function openCaptionGenerator(room, partnerBiz) {
+// Converts a stored phone number into a clickable wa.me link, deterministically
+// — never trusts an AI model to format phone numbers, since that's exactly
+// the kind of precise, low-tolerance-for-error task free/fast models get
+// subtly wrong (missing digits, wrong country code, added dashes). Assumes
+// Uganda local numbers (leading 0) unless already in international format.
+function toWhatsAppLink(phone) {
+  if (!phone) return null;
+  let digits = String(phone).replace(/[^\d]/g, "");
+  if (!digits) return null;
+  if (digits.startsWith("0")) digits = "256" + digits.slice(1);
+  return `https://wa.me/${digits}`;
+}
+
+function openCaptionGenerator(room, partnerBiz, partnerId) {
+  const tracker = room.tracker;
+  const hasCodes = tracker?.status === "confirmed";
+  const myCode = hasCodes ? tracker.codes?.[state.user.uid] : null;
+  const partnerCode = hasCodes ? tracker.codes?.[partnerId] : null;
+
   showModal(`
     <h3 style="margin:0 0 4px;">✨ Generate a Caption</h3>
     <p class="hint" style="margin:0 0 14px;">A ready-to-post caption for both of you — just describe the offer.</p>
@@ -1115,6 +1138,18 @@ function openCaptionGenerator(room, partnerBiz) {
       <h4><i class="fa-solid fa-store"></i> Businesses</h4>
       <p>${esc(state.business.name)} × ${esc(partnerBiz?.name || "Partner")}</p>
     </div>
+    ${!hasCodes ? `
+      <div class="detail-block" style="background:var(--accent-light);">
+        <h4><i class="fa-solid fa-tags"></i> No redemption codes yet</h4>
+        <p style="margin-bottom:8px;">You haven't set up tracking codes for this room. Set them up first so the caption can reference real codes, or continue without — it'll just say to ask in-store.</p>
+        <button class="btn btn-outline btn-sm" id="capGoSetCodesBtn"><i class="fa-solid fa-arrow-right"></i> Set Up Codes First (Workspace)</button>
+      </div>
+    ` : `
+      <div class="detail-block">
+        <h4><i class="fa-solid fa-tags"></i> Using your confirmed codes</h4>
+        <p>${esc(myCode)} · ${esc(partnerCode)}</p>
+      </div>
+    `}
     <div class="field"><label>What's the offer?</label>
       <textarea id="capOffer" rows="3" placeholder="e.g. 15% off coffee when you show a haircut receipt from Zziwa this week"></textarea>
     </div>
@@ -1125,34 +1160,53 @@ function openCaptionGenerator(room, partnerBiz) {
     <button class="btn btn-outline" id="capCloseBtn" style="width:100%;margin-top:10px;">Close</button>
   `);
   document.getElementById("capCloseBtn").onclick = closeModal;
+  const goSetCodesBtn = document.getElementById("capGoSetCodesBtn");
+  if (goSetCodesBtn) goSetCodesBtn.onclick = () => { closeModal(); go(`#/room/${room.id}/workspace`); };
+
   document.getElementById("capGenerateBtn").onclick = async () => {
     const offer = document.getElementById("capOffer").value.trim();
     if (!offer) { toast("Describe the offer first."); return; }
     const btn = document.getElementById("capGenerateBtn");
     btn.disabled = true; btn.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> Generating...`;
     try {
-      const res = await fetch("/.netlify/functions/generate-caption", {
+      const res = await fetch(`${domain}/.netlify/functions/generate-caption`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           businessA: { name: state.business.name, location: state.business.location, website: document.getElementById("capWebsiteA").value.trim() || null },
           businessB: { name: partnerBiz?.name || "Partner", location: partnerBiz?.location, website: document.getElementById("capWebsiteB").value.trim() || null },
           offer,
+          codeA: myCode,
+          codeB: partnerCode,
         }),
       });
       const data = await res.json().catch(() => null);
       if (!res.ok || !data?.caption) throw new Error(data?.error || "Couldn't generate a caption — try again.");
+
+      // WhatsApp contact lines are built here, not by the AI — real phone
+      // numbers formatted deterministically, only for businesses that
+      // actually have one on file.
+      const waA = toWhatsAppLink(state.business.phone);
+      const waB = toWhatsAppLink(partnerBiz?.phone);
+      let waBlock = "";
+      if (waA || waB) {
+        waBlock = "\n\n📲 Message on WhatsApp:";
+        if (waA) waBlock += `\n${state.business.name}: ${waA}`;
+        if (waB) waBlock += `\n${partnerBiz?.name || "Partner"}: ${waB}`;
+      }
+      const fullText = data.caption + waBlock;
+
       document.getElementById("capResultWrap").innerHTML = `
-        <div class="detail-block" style="white-space:pre-wrap;background:var(--accent-light);padding:12px;border-radius:var(--radius-sm);">${esc(data.caption)}</div>
+        <div class="detail-block" style="white-space:pre-wrap;background:var(--accent-light);padding:12px;border-radius:var(--radius-sm);">${esc(fullText)}</div>
         <button class="btn btn-outline" id="capCopyBtn" style="width:100%;margin-top:10px;"><i class="fa-solid fa-copy"></i> Copy</button>
         <button class="btn btn-primary" id="capPostBtn" style="width:100%;margin-top:8px;"><i class="fa-solid fa-paper-plane"></i> Post to Chat</button>
       `;
       document.getElementById("capCopyBtn").onclick = async () => {
-        try { await navigator.clipboard.writeText(data.caption); toast("Copied!"); }
+        try { await navigator.clipboard.writeText(fullText); toast("Copied!"); }
         catch (e) { toast("Couldn't copy automatically — select the text manually."); }
       };
       document.getElementById("capPostBtn").onclick = async () => {
-        await addDoc(collection(db, "rooms", room.id, "messages"), { senderId: state.user.uid, text: data.caption, imageUrl: null, createdAt: serverTimestamp() });
+        await addDoc(collection(db, "rooms", room.id, "messages"), { senderId: state.user.uid, text: fullText, imageUrl: null, createdAt: serverTimestamp() });
         closeModal();
         toast("Posted to chat!");
       };
@@ -1165,293 +1219,7 @@ function openCaptionGenerator(room, partnerBiz) {
   };
 }
 
-// ============================================================
-// Combined Ad Image — a client-side Canvas composite, not an AI image
-// generator. This is deliberate: an image-generation model illustrating
-// "Wolf Gadgets" literally draws a wolf, and "Stuart Web Dev" gets a random
-// sports car — it doesn't understand a business name as a name, it just
-// pattern-matches the words. Worse, no model reliably produces a precisely
-// laid-out graphic (exact icons, readable small text, a real address) —
-// that's structured design, not generative art, and no text-to-image model
-// does that well, free or paid. So instead: real uploaded logos where a
-// business has one, a category-matched icon/color theme where it doesn't,
-// and only real data (names, category, the actual offer text, real
-// redemption codes) — nothing guessed, nothing hallucinated.
-// ============================================================
-function genRedemptionCode(name) {
-  const base = (name || "PARTNER").replace(/[^a-zA-Z]/g, "").slice(0, 8).toUpperCase();
-  return (base || "PARTNER") + "10";
-}
-
-function loadImageEl(url) {
-  return new Promise((resolve) => {
-    if (!url) { resolve(null); return; }
-    const img = new Image();
-    img.crossOrigin = "anonymous"; // Cloudinary serves with CORS headers, needed so canvas.toDataURL doesn't get blocked as "tainted"
-    img.onload = () => resolve(img);
-    img.onerror = () => resolve(null); // fall back to initials rather than fail the whole composite
-    img.src = url;
-  });
-}
-
-// Maps a business's stored `category` text to a themed color + emoji icon,
-// used only when that business has no uploaded logo. Simple substring
-// matching against real category keywords — never guesses at content the
-// business didn't actually provide.
-function categoryTheme(category) {
-  const c = (category || "").toLowerCase();
-  const themes = [
-    { keys: ["coffee", "cafe", "café"], color: "#5C3A21", icon: "☕" },
-    { keys: ["bakery", "bake", "cake", "pastry"], color: "#A8551F", icon: "🧁" },
-    { keys: ["restaurant", "food", "grill", "kitchen"], color: "#B5651D", icon: "🍽️" },
-    { keys: ["salon", "beauty", "spa", "hair", "barber"], color: "#8A3556", icon: "💇" },
-    { keys: ["boutique", "fashion", "cloth", "wear", "tailor"], color: "#6B4A9E", icon: "👗" },
-    { keys: ["book", "stationery", "print"], color: "#2D5940", icon: "📚" },
-    { keys: ["gym", "fitness", "fit"], color: "#1F5C56", icon: "💪" },
-    { keys: ["hardware", "construction", "build"], color: "#5C4A33", icon: "🔨" },
-    { keys: ["furniture"], color: "#7A5A2E", icon: "🛋️" },
-    { keys: ["electr", "tech", "phone", "gadget"], color: "#2A4E8C", icon: "📱" },
-    { keys: ["pharmac", "medic", "clinic", "hospital", "health"], color: "#1F7A5C", icon: "⚕️" },
-    { keys: ["supermarket", "grocery", "shop", "store"], color: "#8C6A1F", icon: "🛒" },
-    { keys: ["guest", "hotel", "lodge"], color: "#383A7A", icon: "🛏️" },
-  ];
-  for (const t of themes) {
-    if (t.keys.some((k) => c.includes(k))) return t;
-  }
-  return { color: "#5B3FD9", icon: "🏪" }; // brand-purple default when category doesn't match a keyword
-}
-
-function drawCircleLogo(ctx, img, business, cx, cy, r) {
-  const theme = categoryTheme(business?.category);
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.closePath();
-  ctx.clip();
-  if (img) {
-    const scale = Math.max((r * 2) / img.width, (r * 2) / img.height);
-    const w = img.width * scale, h = img.height * scale;
-    ctx.drawImage(img, cx - w / 2, cy - h / 2, w, h);
-  } else {
-    // No uploaded logo — use the category-matched color + emoji instead of
-    // guessing, so this still looks intentional rather than blank.
-    ctx.fillStyle = theme.color;
-    ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
-    ctx.font = `${Math.round(r * 0.85)}px Arial`;
-    ctx.textAlign = "center"; ctx.textBaseline = "middle";
-    ctx.fillText(theme.icon, cx, cy + r * 0.05);
-  }
-  ctx.restore();
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.lineWidth = 7; ctx.strokeStyle = "#FBF8F2";
-  ctx.stroke();
-  return theme;
-}
-
-function wrapTextCentered(ctx, text, centerX, y, maxWidth, lineHeight) {
-  const words = (text || "").split(" ");
-  let line = "";
-  const lines = [];
-  for (const w of words) {
-    const test = line ? line + " " + w : w;
-    if (ctx.measureText(test).width > maxWidth && line) { lines.push(line); line = w; }
-    else line = test;
-  }
-  if (line) lines.push(line);
-  lines.forEach((l, i) => ctx.fillText(l, centerX, y + i * lineHeight));
-  return lines.length;
-}
-
-function roundRectPath(ctx, x, y, w, h, r) {
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r);
-  ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r);
-  ctx.arcTo(x, y, x + w, y, r);
-  ctx.closePath();
-}
-
-async function generateCombinedAdImage(bizA, bizB, offerText, tracker, aiBackgroundImg) {
-  const size = 1080;
-  const canvas = document.createElement("canvas");
-  canvas.width = size; canvas.height = size;
-  const ctx = canvas.getContext("2d");
-  const cream = "#FBF8F2";
-  const midX = size / 2;
-
-  if (aiBackgroundImg) {
-    // AI path: the model was asked to leave two blank zones at the exact
-    // coordinates the logo circles below use, and to design everything
-    // else itself — so unlike the template path, we do NOT draw the
-    // chevron/cream shapes here, just cover-fit the AI art as the whole
-    // background and layer the same logo/text elements on top of it.
-    const scale = Math.max(size / aiBackgroundImg.width, size / aiBackgroundImg.height);
-    const w = aiBackgroundImg.width * scale, h = aiBackgroundImg.height * scale;
-    ctx.drawImage(aiBackgroundImg, (size - w) / 2, (size - h) / 2, w, h);
-    // Soft dark wash so white name/footer text stays legible regardless of
-    // what the AI generated underneath it.
-    ctx.fillStyle = "rgba(20,15,50,0.15)";
-    ctx.fillRect(0, 0, size, size);
-  } else {
-    // Template path: deterministic chevron split, guaranteed to look
-    // intentional every time, no matter what the businesses are.
-    const themeA = categoryTheme(bizA?.category);
-    const themeB = categoryTheme(bizB?.category);
-    if (themeA.color === themeB.color) themeB.color = "#3A3560"; // rare same-category collision — keep the two sides visually distinct
-
-    const edgeY = 190, apexY = 380;
-    ctx.fillStyle = cream;
-    ctx.fillRect(0, 0, size, size);
-
-    ctx.fillStyle = themeA.color;
-    ctx.beginPath();
-    ctx.moveTo(0, edgeY); ctx.lineTo(midX, apexY); ctx.lineTo(midX, size); ctx.lineTo(0, size);
-    ctx.closePath(); ctx.fill();
-
-    ctx.fillStyle = themeB.color;
-    ctx.beginPath();
-    ctx.moveTo(size, edgeY); ctx.lineTo(midX, apexY); ctx.lineTo(midX, size); ctx.lineTo(size, size);
-    ctx.closePath(); ctx.fill();
-
-    ctx.fillStyle = "#333";
-    ctx.font = "700 22px Arial";
-    ctx.textAlign = "center"; ctx.textBaseline = "middle";
-    ctx.fillText("TWO LOCAL FAVORITES", midX, 78);
-    ctx.fillStyle = "#1e1e2a";
-    ctx.font = "800 52px Arial";
-    ctx.fillText("Better together.", midX, 132);
-
-    ctx.fillStyle = cream;
-    ctx.font = "34px Arial";
-    ctx.fillText("♥", midX, apexY - 10);
-  }
-
-  // ---- Logo circles — same coordinates whichever path was taken above, so
-  // they land exactly where the AI prompt was told to leave space clear. ----
-  ctx.textAlign = "center"; ctx.textBaseline = "middle";
-  const [imgA, imgB] = await Promise.all([loadImageEl(bizA?.photoURL), loadImageEl(bizB?.photoURL)]);
-  const r = 118, cy = 400;
-  drawCircleLogo(ctx, imgA, bizA, midX - 240, cy, r);
-  drawCircleLogo(ctx, imgB, bizB, midX + 240, cy, r);
-
-  ctx.fillStyle = "#fff";
-  ctx.font = "700 30px Arial";
-  ctx.shadowColor = aiBackgroundImg ? "rgba(0,0,0,0.5)" : "transparent"; ctx.shadowBlur = aiBackgroundImg ? 8 : 0;
-  ctx.fillText(bizA?.name || "Business A", midX - 240, cy + r + 44);
-  ctx.fillText(bizB?.name || "Business B", midX + 240, cy + r + 44);
-  ctx.shadowBlur = 0;
-
-  // ---- Offer card — the real, accurate content, not a fabricated tagline ----
-  const cardW = size - 140, cardH = 260, cardX = (size - cardW) / 2, cardY = 600;
-  ctx.fillStyle = "rgba(255,255,255,0.97)";
-  roundRectPath(ctx, cardX, cardY, cardW, cardH, 22);
-  ctx.fill();
-
-  ctx.fillStyle = "#1e1e2a";
-  ctx.font = "800 30px Arial";
-  ctx.fillText("This week's joint offer", midX, cardY + 46);
-
-  ctx.font = "26px Arial";
-  ctx.fillStyle = "#333";
-  wrapTextCentered(ctx, offerText || "Ask either business about this partnership!", midX, cardY + 92, cardW - 70, 34);
-
-  // ---- Redemption codes, only if tracking has actually been set up (real
-  // data only — never fabricates a code that doesn't exist yet) ----
-  if (tracker?.codes) {
-    ctx.font = "600 20px Arial";
-    ctx.fillStyle = "#5B3FD9";
-    const codeLine = `Use ${tracker.codes[Object.keys(tracker.codes)[0]]} or ${tracker.codes[Object.keys(tracker.codes)[1]]} to claim`;
-    ctx.fillText(codeLine, midX, cardY + cardH - 34);
-  }
-
-  // ---- Footer ----
-  ctx.font = "500 22px Arial";
-  ctx.fillStyle = "#fff";
-  ctx.shadowColor = "rgba(0,0,0,0.3)"; ctx.shadowBlur = 6;
-  const footer = [bizA?.location, bizB?.location].filter(Boolean).join("   •   ");
-  if (footer) ctx.fillText(footer, midX, size - 44);
-  ctx.shadowBlur = 0;
-
-  return canvas;
-}
-
-// Fetches the AI-generated background and returns a loaded <img>, or null if
-// it fails for any reason (not configured, quota, network) — the caller
-// falls back to the deterministic template rather than treat this as
-// guaranteed. Logs the real reason either way, since a silent null makes
-// "nothing happened" impossible to diagnose from the outside.
-async function fetchAIBackground(offerText, bizA, bizB) {
-  try {
-    const res = await fetch("/.netlify/functions/generate-campaign-art", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        offer: offerText || "a joint small-business promotion",
-        // Names/categories are plain text — safe to pass along, unlike
-        // logos, which are never sent anywhere near this call.
-        businessA: bizA?.name || null,
-        businessB: bizB?.name || null,
-        categoryA: bizA?.category || null,
-        categoryB: bizB?.category || null,
-      }),
-    });
-    const data = await res.json().catch(() => null);
-    if (!res.ok || !data?.imageBase64) {
-      console.warn("AI background unavailable:", data?.error || `HTTP ${res.status}`);
-      return null;
-    }
-    return await loadImageEl(`data:${data.mimeType || "image/png"};base64,${data.imageBase64}`);
-  } catch (e) {
-    console.warn("AI background request failed:", e);
-    return null;
-  }
-}
-
-function openAdImageComposer(room, partnerBiz) {
-  showModal(`
-    <h3 style="margin:0 0 4px;">🖼️ Combined Ad Image</h3>
-    <p class="hint" style="margin:0 0 14px;">Both businesses' real logos are placed on top exactly as uploaded, either way — only the background style changes below.</p>
-    <div class="field"><label>Offer / headline text</label>
-      <textarea id="imgOfferInput" rows="2" placeholder="e.g. 15% off coffee with any Zziwa haircut receipt"></textarea>
-    </div>
-    <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:6px;">
-      <input type="checkbox" id="imgUseAI" checked style="width:16px;height:16px;">
-      Try AI-generated background <span class="hint">(free, but a fast free model — may not always follow the layout perfectly)</span>
-    </label>
-    <p class="hint" style="margin:0 0 14px;">If unchecked, or if the AI result doesn't come back usable, this uses the reliable template design instead — never a blank result.</p>
-    <button class="btn btn-primary" id="imgGenerateBtn" style="width:100%;"><i class="fa-solid fa-image"></i> Generate Image</button>
-    <div id="imgResultWrap" style="margin-top:14px;"></div>
-    <button class="btn btn-outline" id="imgCloseBtn" style="width:100%;margin-top:10px;">Close</button>
-  `);
-  document.getElementById("imgCloseBtn").onclick = closeModal;
-  document.getElementById("imgGenerateBtn").onclick = async () => {
-    const btn = document.getElementById("imgGenerateBtn");
-    try {
-      const offerText = document.getElementById("imgOfferInput").value.trim();
-      const useAI = document.getElementById("imgUseAI").checked;
-      btn.disabled = true; btn.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> ${useAI ? "Designing background..." : "Generating..."}`;
-      let aiBg = null, usedFallback = false;
-      if (useAI) {
-        aiBg = await fetchAIBackground(offerText, state.business, partnerBiz);
-        usedFallback = !aiBg;
-      }
-      const canvas = await generateCombinedAdImage(state.business, partnerBiz, offerText, room.tracker, aiBg);
-      const dataUrl = canvas.toDataURL("image/png");
-      document.getElementById("imgResultWrap").innerHTML = `
-        ${usedFallback ? `<p class="hint" style="color:var(--warn);margin-bottom:8px;">AI background wasn't available this time, so this uses the reliable template instead.</p>` : ""}
-        <img src="${dataUrl}" style="width:100%;border-radius:12px;margin-bottom:10px;" alt="Combined ad image">
-        <a class="btn btn-primary" id="imgDownloadBtn" style="width:100%;display:block;text-align:center;text-decoration:none;box-sizing:border-box;" href="${dataUrl}" download="adroomie-${room.id}.png"><i class="fa-solid fa-download"></i> Download PNG</a>
-      `;
-    } catch (err) {
-      document.getElementById("imgResultWrap").innerHTML = `<p class="hint" style="color:var(--warn);">Couldn't generate the image — try again.</p>`;
-      console.error("Ad image generation failed:", err);
-    } finally {
-      btn.disabled = false; btn.innerHTML = `<i class="fa-solid fa-image"></i> Generate Image`;
-    }
-  };
-}
+// (Image generation removed — captions + redemption codes only. See conversation history if ever revisited.)
 
 function renderWorkspaceTab(container, room) {
   const otherId = room.createdBy === state.user.uid ? room.partnerId : room.createdBy;
@@ -1469,7 +1237,6 @@ function renderWorkspaceTab(container, room) {
     <div id="creativesGrid"></div>
     <div class="upload-dropzone" id="creativeDrop"><i class="fa-solid fa-cloud-arrow-up"></i><strong>Upload / Add Creative</strong>Or ask adRoomie for help — reply in Chat</div>
     <input type="file" id="creativeInput" accept="image/*" style="display:none;">
-    <button class="btn btn-outline" id="composeAdImageBtn" style="width:100%;margin-top:10px;"><i class="fa-solid fa-wand-magic-sparkles"></i> Generate Combined Ad Image</button>
     ${room.status === "confirmed" ? `<div id="launchBtnWrap" style="margin-top:16px;"></div>` : ""}
   `;
   // Render the card skeleton once — self info is known synchronously,
@@ -1511,14 +1278,48 @@ function renderWorkspaceTab(container, room) {
   state.unsub.push(unsubPartner);
 
   // ---------- Redemption Tracker ----------
-  // Each business gets a code derived from their own name. When a customer
-  // redeems the PARTNER's code at YOUR shop, you tap +1 — crediting THEM, not
-  // yourself. That's deliberate: neither business has any incentive to
-  // inflate a count, since tapping the button only benefits the other side.
-  // It's not tamper-proof (someone could still tap it dishonestly), but it's
-  // a real improvement over "no tracking at all," and both partners watching
-  // the same live numbers is the actual deterrent — same principle as a
-  // shared chat transcript.
+  // Codes now require BOTH businesses to agree before going live — one side
+  // proposes (AI-generated, memorable, tied to the business name/offer),
+  // the other accepts or asks for different ones. Once confirmed: when a
+  // customer redeems the PARTNER's code at YOUR shop, you tap +1 — crediting
+  // THEM, not yourself. Neither business has any incentive to inflate a
+  // count, since tapping the button only benefits the other side.
+  async function proposeTrackerCodes(partnerBiz) {
+    try {
+      const res = await fetch(`${domain}/.netlify/functions/generate-codes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          businessA: state.business.name,
+          businessB: partnerBiz?.name,
+          offer: room.campaignPlan?.goal || room.goal || "",
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.codeA && data?.codeB) {
+        const codes = { [state.user.uid]: data.codeA, [otherId]: data.codeB };
+        if (codes[state.user.uid] === codes[otherId]) codes[otherId] += "B";
+        return codes;
+      }
+      console.warn("AI code generation unavailable, using fallback:", data?.error);
+    } catch (e) {
+      console.warn("AI code generation request failed, using fallback:", e);
+    }
+    // Fallback never blocks the flow — simpler, but always works.
+    const codes = { [state.user.uid]: genRedemptionCode(state.business.name), [otherId]: genRedemptionCode(partnerBiz?.name) };
+    if (codes[state.user.uid] === codes[otherId]) codes[otherId] += "B";
+    return codes;
+  }
+
+  async function sendTrackerProposal() {
+    const partnerBiz = await loadBusiness(otherId);
+    const codes = await proposeTrackerCodes(partnerBiz);
+    const tracker = { codes, redemptions: { [state.user.uid]: 0, [otherId]: 0 }, status: "proposed", proposedBy: state.user.uid };
+    await updateDoc(doc(db, "rooms", room.id), { tracker });
+    room.tracker = tracker;
+    renderTracker();
+  }
+
   function renderTracker() {
     const wrap = document.getElementById("trackerBlock");
     if (!wrap) return;
@@ -1527,23 +1328,48 @@ function renderWorkspaceTab(container, room) {
       return;
     }
     const t = room.tracker;
+
     if (!t) {
       wrap.innerHTML = `
-        <p class="hint" style="margin-bottom:10px;">Generate a code for each business so you can track who brings in customers for the other — no spreadsheets, no arguing.</p>
-        <button class="btn btn-outline" id="setupTrackerBtn" style="width:100%;"><i class="fa-solid fa-tags"></i> Set Up Tracking Codes</button>
+        <p class="hint" style="margin-bottom:10px;">Propose a redemption code for each business so you can track who brings in customers for the other — no spreadsheets, no arguing. Your partner has to accept before it goes live.</p>
+        <button class="btn btn-outline" id="proposeTrackerBtn" style="width:100%;"><i class="fa-solid fa-tags"></i> Propose Tracking Codes</button>
       `;
-      document.getElementById("setupTrackerBtn").onclick = async () => {
-        const partnerBiz = await loadBusiness(otherId);
-        const codes = { [state.user.uid]: genRedemptionCode(state.business.name), [otherId]: genRedemptionCode(partnerBiz?.name) };
-        if (codes[state.user.uid] === codes[otherId]) codes[otherId] += "B"; // avoid a rare name-collision producing identical codes
-        const tracker = { codes, redemptions: { [state.user.uid]: 0, [otherId]: 0 } };
-        await updateDoc(doc(db, "rooms", room.id), { tracker });
-        room.tracker = tracker;
-        renderTracker();
-        toast("Tracking codes ready!");
+      const btn = document.getElementById("proposeTrackerBtn");
+      btn.onclick = async () => {
+        btn.disabled = true; btn.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> Generating...`;
+        await sendTrackerProposal();
       };
       return;
     }
+
+    if (t.status === "proposed") {
+      const myCode = t.codes?.[state.user.uid] || "—";
+      const partnerCode = t.codes?.[otherId] || "—";
+      const iProposed = t.proposedBy === state.user.uid;
+      wrap.innerHTML = `
+        <div class="detail-block">
+          <h4><i class="fa-solid fa-tags"></i> Proposed codes</h4>
+          <p>Your code: <strong>${esc(myCode)}</strong><br>Partner's code: <strong>${esc(partnerCode)}</strong></p>
+        </div>
+        ${iProposed ? `<p class="hint" style="margin-bottom:8px;">Waiting for your partner to accept these.</p>` : ""}
+        ${!iProposed ? `<button class="btn btn-primary" id="acceptTrackerBtn" style="width:100%;margin-bottom:8px;"><i class="fa-solid fa-check"></i> Accept These Codes</button>` : ""}
+        <button class="btn btn-outline btn-sm" id="regenTrackerBtn"><i class="fa-solid fa-rotate"></i> Suggest Different Codes</button>
+      `;
+      const regenBtn = document.getElementById("regenTrackerBtn");
+      regenBtn.onclick = async () => {
+        regenBtn.disabled = true; regenBtn.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> Generating...`;
+        await sendTrackerProposal();
+      };
+      const acceptBtn = document.getElementById("acceptTrackerBtn");
+      if (acceptBtn) acceptBtn.onclick = async () => {
+        await updateDoc(doc(db, "rooms", room.id), { "tracker.status": "confirmed" });
+        room.tracker.status = "confirmed";
+        renderTracker();
+        toast("Tracking codes confirmed!");
+      };
+      return;
+    }
+
     const myCode = t.codes?.[state.user.uid] || "—";
     const partnerCode = t.codes?.[otherId] || "—";
     const myRedemptions = t.redemptions?.[state.user.uid] || 0;
@@ -1551,12 +1377,14 @@ function renderWorkspaceTab(container, room) {
     wrap.innerHTML = `
       <div class="detail-block">
         <h4><i class="fa-solid fa-tag"></i> Your code: ${esc(myCode)}</h4>
-        <p>Used at your partner's shop: <strong>${myRedemptions}</strong> ${myRedemptions === 1 ? "time" : "times"} <span class="hint">(they tap +1 when someone uses it there)</span></p>
+        <p style="font-weight:600;margin:2px 0;">Customers show <span style="color:var(--accent);">${esc(myCode)}</span> at your partner's shop to redeem.</p>
+        <p class="hint">Used there so far: ${myRedemptions} ${myRedemptions === 1 ? "time" : "times"} — they tap +1 when it happens.</p>
       </div>
       <div class="detail-block">
         <h4><i class="fa-solid fa-tag"></i> Partner's code: ${esc(partnerCode)}</h4>
-        <p>Used at your shop: <strong>${partnerRedemptions}</strong> ${partnerRedemptions === 1 ? "time" : "times"}</p>
-        <button class="btn btn-outline btn-sm" id="incrementRedemptionBtn" style="margin-top:8px;"><i class="fa-solid fa-plus"></i> Someone just used ${esc(partnerCode)} here</button>
+        <p style="font-weight:600;margin:2px 0;">Customers show <span style="color:var(--accent);">${esc(partnerCode)}</span> HERE to redeem.</p>
+        <p class="hint" style="margin-bottom:8px;">Used here so far: ${partnerRedemptions} ${partnerRedemptions === 1 ? "time" : "times"}</p>
+        <button class="btn btn-outline btn-sm" id="incrementRedemptionBtn"><i class="fa-solid fa-plus"></i> Someone just used ${esc(partnerCode)} here</button>
       </div>
     `;
     document.getElementById("incrementRedemptionBtn").onclick = async () => {
@@ -1576,10 +1404,6 @@ function renderWorkspaceTab(container, room) {
   });
   state.unsub.push(unsubTracker);
 
-  document.getElementById("composeAdImageBtn").onclick = async () => {
-    const partnerBiz = await loadBusiness(otherId);
-    openAdImageComposer(room, partnerBiz);
-  };
   function drawCreatives() {
     document.getElementById("creativesGrid").innerHTML = (room.creatives || []).map((c) => `<img class="creative-thumb" src="${c.url}">`).join("") || "";
   }

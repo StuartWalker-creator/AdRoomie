@@ -35,22 +35,27 @@ exports.handler = async (event) => {
     return { statusCode: 400, body: JSON.stringify({ error: "Invalid request." }) };
   }
 
-  const { businessA, businessB, offer } = payload || {};
+  const { businessA, businessB, offer, codeA, codeB } = payload || {};
   if (!businessA?.name || !businessB?.name || !offer) {
     return { statusCode: 400, body: JSON.stringify({ error: "Missing business names or offer details." }) };
   }
+
+  const codesLine = (codeA && codeB)
+    ? `Redemption codes (use these EXACT codes, do not invent different ones): customers show "${codeA}" at ${businessB.name} to redeem; customers show "${codeB}" at ${businessA.name} to redeem.`
+    : `No redemption codes exist yet for this campaign — do NOT invent or make up a code. Instead, the "How to claim" steps should just say to ask in-store or DM either business to claim.`;
 
   const prompt = `Write a short, upbeat Instagram/Facebook caption for a JOINT ad campaign between two small local businesses co-promoting each other.
 
 Business A: ${businessA.name}${businessA.location ? ` (${businessA.location})` : ""}${businessA.website ? `, ${businessA.website}` : ""}
 Business B: ${businessB.name}${businessB.location ? ` (${businessB.location})` : ""}${businessB.website ? `, ${businessB.website}` : ""}
 The offer: ${offer}
+${codesLine}
 
 Requirements:
 - Open with 1-2 emojis that genuinely fit both businesses, not generic ones.
 - Mention both business names naturally in the copy.
 - Clearly state the offer/deal.
-- Include a short numbered "How to claim" section (2-3 steps max).
+- Include a short numbered "How to claim" section (2-3 steps max) — follow the redemption codes instruction above exactly, never invent a code that wasn't given to you.
 - End with 3-5 relevant local hashtags (assume Uganda/East Africa unless a location given suggests otherwise).
 - Keep it under 120 words total.
 - Plain text only — no markdown formatting, no asterisks — ready to paste straight into Instagram.`;
