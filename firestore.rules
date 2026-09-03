@@ -26,11 +26,19 @@ service cloud.firestore {
       allow delete: if false;
 
       match /requests/{requestId} {
+        // Read check uses resource.data.requesterId (not the requestId path
+        // variable) on purpose: the "sent requests" screen runs a
+        // collectionGroup query filtered by the requesterId FIELD, and
+        // Firestore can only allow a cross-collection query when the rule
+        // can be verified straight from that same field — checking the
+        // document ID instead makes Firestore reject the whole query with
+        // permission-denied, even for the requester's own documents.
         allow read: if request.auth != null &&
-          (request.auth.uid == requestId ||
+          (resource.data.requesterId == request.auth.uid ||
            request.auth.uid == get(/databases/$(database)/documents/rooms/$(roomId)).data.createdBy ||
            isAdmin());
-        allow create: if request.auth != null && request.auth.uid == requestId;
+        allow create: if request.auth != null && request.auth.uid == requestId &&
+          request.resource.data.requesterId == request.auth.uid;
         allow update: if request.auth != null &&
           (request.auth.uid == get(/databases/$(database)/documents/rooms/$(roomId)).data.createdBy || isAdmin());
       }
@@ -53,6 +61,33 @@ service cloud.firestore {
            request.auth.uid == get(/databases/$(database)/documents/rooms/$(roomId)).data.partnerId ||
            isAdmin());
       }
+    }
+
+    // Top-level collection-group rule for /requests — this is the pattern
+    // Firebase's own docs use for collectionGroup() queries (see their
+    // "transactions" example: match /{path=**}/transactions/{transaction}).
+    // The nested rule above under /rooms/{roomId}/requests/{requestId}
+    // handles normal per-room reads/writes fine, but a collectionGroup query
+    // (used by the "sent requests" screen, which searches every room's
+    // requests subcollection at once) needs this explicit top-level match to
+    // be reliably verifiable — relying on the nested rule alone was the bug.
+    // roomId isn't available as a path variable here, so this uses the
+    // roomId FIELD stored on the request document itself instead.
+    match /{path=**}/requests/{requestId} {
+      allow read: if request.auth != null &&
+        (resource.data.requesterId == request.auth.uid ||
+         request.auth.uid == get(/databases/$(database)/documents/rooms/$(resource.data.roomId)).data.createdBy ||
+         isAdmin());
+    }
+
+    // Same fix, same reason, for supportRequests — the admin dashboard runs
+    // a collectionGroup() query across every room's supportRequests at once,
+    // which only the top-level match below can reliably authorize. The
+    // nested rule above still handles normal per-room reads fine (a
+    // participant checking their own room's support requests) — this one is
+    // specifically for the cross-room admin view, so it's admin-only.
+    match /{path=**}/supportRequests/{reqId} {
+      allow read: if isAdmin();
     }
 
     match /reviews/{reviewId} {

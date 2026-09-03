@@ -39,8 +39,6 @@ const ONESIGNAL_APP_ID = "a0bcdf64-4d1a-4360-bc6e-1e01d14c6e5f";
 const ADMIN_UID = "SLIWNQz3e3hGPKMzGhfrTgMUFve2";
 // ---------------------------------------------------------
 
-const domain = window.location.origin
-
 const CATEGORY_OPTIONS = ["Restaurant / Cafe","Bakery","Fitness / Health","Retail","Electronics/Gadgets","Homeware","Education","Beauty & Wellness","Services","Other"];
 const BUDGET_OPTIONS = ["UGX 100,000 - 300,000","UGX 300,000 - 500,000","UGX 500,000 - 800,000","UGX 800,000+"];
 const DURATION_OPTIONS = ["1 week","2 weeks","1 month"];
@@ -568,6 +566,14 @@ function renderProfile() {
       </select>
     </div>
     <div class="field"><label>Location</label><input id="location" value="${esc(b.location)}" placeholder="e.g. Kampala, Uganda"></div>
+    <div class="field"><label>Phone Contact</label>
+      <input id="phoneInput" value="${esc(b.phone || "")}" placeholder="e.g. 0755 123456">
+      <label style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:13px;font-weight:500;">
+        <input type="checkbox" id="phoneIsWhatsApp" ${b.phoneIsWhatsApp ? "checked" : ""} style="width:16px;height:16px;">
+        This number is on WhatsApp
+      </label>
+      <p class="hint">Used for the "Message on WhatsApp" link the AI caption tool adds — toggle off if this number can only take calls/SMS, not WhatsApp.</p>
+    </div>
     <div class="field"><label>Target Audience</label>${renderChipGroup("audienceChips", AUDIENCE_OPTIONS, selectedAudience)}</div>
     <div class="field"><label>Monthly Ad Budget Range</label>
       <select id="budget"><option value="">Select a range</option>
@@ -628,7 +634,8 @@ function renderProfile() {
       audience: Array.from(selectedAudience), budgetRange,
       platforms: Array.from(selectedPlatforms), email: state.user.email,
       emailVerified: state.user.emailVerified,
-      phone: b.phone || null, phoneVerified: false,
+      phone: document.getElementById("phoneInput").value.trim() || null,
+      phoneIsWhatsApp: document.getElementById("phoneIsWhatsApp").checked,
       photoURL: photoURL || null,
       oneSignalPlayerId: b.oneSignalPlayerId || null,
       rating: b.rating || null, reviewCount: b.reviewCount || 0,
@@ -678,8 +685,6 @@ function renderMyRooms() {
   state.unsub.push(onSnapshot(qCreated, (s) => { created = s.docs.map((d) => ({ id: d.id, ...d.data() })); draw(); }));
   state.unsub.push(onSnapshot(qJoined, (s) => { joined = s.docs.map((d) => ({ id: d.id, ...d.data() })); draw(); }));
 }
-console.log(domain)
-
 
 // ============================================================
 // Screen: Explore — browse open rooms posted by others
@@ -1104,7 +1109,6 @@ function renderChatTab(container, room) {
   }
 }
 
-
 // ============================================================
 // AI Caption Generator — calls a Netlify function (netlify/functions/
 // generate-caption.js) which itself calls Google's Gemini API. Requires a
@@ -1112,17 +1116,21 @@ function renderChatTab(container, room) {
 // function file. Nothing here breaks if it's not configured yet; the error
 // just surfaces in the modal instead of a caption.
 // ============================================================
-// Converts a stored phone number into a clickable wa.me link, deterministically
-// — never trusts an AI model to format phone numbers, since that's exactly
-// the kind of precise, low-tolerance-for-error task free/fast models get
-// subtly wrong (missing digits, wrong country code, added dashes). Assumes
-// Uganda local numbers (leading 0) unless already in international format.
-function toWhatsAppLink(phone) {
+// Converts a stored phone number into a clickable contact link,
+// deterministically — never trusts an AI model to format phone numbers,
+// since that's exactly the kind of precise, low-tolerance-for-error task
+// free/fast models get subtly wrong (missing digits, wrong country code,
+// added dashes). Assumes Uganda local numbers (leading 0) unless already in
+// international format. Returns a wa.me link only if the business actually
+// toggled "this number is on WhatsApp" in their profile — otherwise a plain
+// tel: link, since a wa.me link to a non-WhatsApp number just leads to a
+// dead end for the customer.
+function toContactLink(phone, isWhatsApp) {
   if (!phone) return null;
   let digits = String(phone).replace(/[^\d]/g, "");
   if (!digits) return null;
   if (digits.startsWith("0")) digits = "256" + digits.slice(1);
-  return `https://wa.me/${digits}`;
+  return isWhatsApp ? { url: `https://wa.me/${digits}`, label: "WhatsApp" } : { url: `tel:+${digits}`, label: "Call" };
 }
 
 function openCaptionGenerator(room, partnerBiz, partnerId) {
@@ -1169,7 +1177,7 @@ function openCaptionGenerator(room, partnerBiz, partnerId) {
     const btn = document.getElementById("capGenerateBtn");
     btn.disabled = true; btn.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> Generating...`;
     try {
-      const res = await fetch(`${domain}/.netlify/functions/generate-caption`, {
+      const res = await fetch("/.netlify/functions/generate-caption", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1183,16 +1191,17 @@ function openCaptionGenerator(room, partnerBiz, partnerId) {
       const data = await res.json().catch(() => null);
       if (!res.ok || !data?.caption) throw new Error(data?.error || "Couldn't generate a caption — try again.");
 
-      // WhatsApp contact lines are built here, not by the AI — real phone
-      // numbers formatted deterministically, only for businesses that
-      // actually have one on file.
-      const waA = toWhatsAppLink(state.business.phone);
-      const waB = toWhatsAppLink(partnerBiz?.phone);
+      // Contact lines are built here, not by the AI — real phone numbers
+      // formatted deterministically, only for businesses that actually have
+      // one on file, and only as a wa.me link if they toggled that number as
+      // being on WhatsApp — otherwise a plain call link instead.
+      const contactA = toContactLink(state.business.phone, state.business.phoneIsWhatsApp);
+      const contactB = toContactLink(partnerBiz?.phone, partnerBiz?.phoneIsWhatsApp);
       let waBlock = "";
-      if (waA || waB) {
-        waBlock = "\n\n📲 Message on WhatsApp:";
-        if (waA) waBlock += `\n${state.business.name}: ${waA}`;
-        if (waB) waBlock += `\n${partnerBiz?.name || "Partner"}: ${waB}`;
+      if (contactA || contactB) {
+        waBlock = "\n\n📲 Get in touch:";
+        if (contactA) waBlock += `\n${state.business.name} (${contactA.label}): ${contactA.url}`;
+        if (contactB) waBlock += `\n${partnerBiz?.name || "Partner"} (${contactB.label}): ${contactB.url}`;
       }
       const fullText = data.caption + waBlock;
 
@@ -1286,7 +1295,7 @@ function renderWorkspaceTab(container, room) {
   // count, since tapping the button only benefits the other side.
   async function proposeTrackerCodes(partnerBiz) {
     try {
-      const res = await fetch(`${domain}/.netlify/functions/generate-codes`, {
+      const res = await fetch("/.netlify/functions/generate-codes", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1683,8 +1692,16 @@ async function renderAdmin() {
       feedEl.querySelectorAll(".room-card").forEach((c) => { c.onclick = () => go(`#/room/${c.dataset.room}/chat`); });
     }
   } catch (e) {
-    feedEl.innerHTML = `<p class="hint">Can't load yet — check the browser console for a Firestore index link (one-time setup, same pattern as Inbox).</p>`;
-    console.warn("Admin support feed needs an index:", e);
+    // Same two possible causes as the Inbox sent-requests query:
+    // 1) failed-precondition — this query needs a composite index (collectionGroup
+    //    + orderBy always does). Firestore's console error includes a direct
+    //    "create index" link — click it once, done forever.
+    // 2) permission-denied — a firestore.rules issue, not an index issue.
+    const isIndexIssue = e?.code === "failed-precondition";
+    feedEl.innerHTML = isIndexIssue
+      ? `<p class="hint">Can't load yet — check the browser console for a Firestore index link (one-time setup).</p>`
+      : `<p class="hint">Can't load support requests right now — there's a permissions issue, not an index issue.</p>`;
+    console.warn(`Admin support feed failed (${e?.code || "unknown"}):`, e);
   }
 
   // --- Every room, regardless of who owns it ---
