@@ -1285,6 +1285,12 @@ function renderWorkspaceTab(container, room) {
     if (pEl) pEl.innerHTML = `<span class="${p.dot}"></span>${p.text}`;
   });
   state.unsub.push(unsubPartner);
+  
+  function genRedemptionCode(name) {
+  const base = (name || "PARTNER").replace(/[^a-zA-Z]/g, "").slice(0, 8).toUpperCase();
+  return (base || "PARTNER") + "10";
+}
+
 
   // ---------- Redemption Tracker ----------
   // Codes now require BOTH businesses to agree before going live — one side
@@ -1295,7 +1301,7 @@ function renderWorkspaceTab(container, room) {
   // count, since tapping the button only benefits the other side.
   async function proposeTrackerCodes(partnerBiz) {
     try {
-      const res = await fetch("/.netlify/functions/generate-codes", {
+      const res = await fetch(`${domain}/.netlify/functions/generate-codes`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
