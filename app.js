@@ -39,6 +39,8 @@ const ONESIGNAL_APP_ID = "a0bcdf64-4d1a-4360-bc6e-1e01d14c6e5f";
 const ADMIN_UID = "SLIWNQz3e3hGPKMzGhfrTgMUFve2";
 // ---------------------------------------------------------
 
+const domain = window.location.origin
+
 const CATEGORY_OPTIONS = ["Restaurant / Cafe","Bakery","Fitness / Health","Retail","Electronics/Gadgets","Homeware","Education","Beauty & Wellness","Services","Other"];
 const BUDGET_OPTIONS = ["UGX 100,000 - 300,000","UGX 300,000 - 500,000","UGX 500,000 - 800,000","UGX 800,000+"];
 const DURATION_OPTIONS = ["1 week","2 weeks","1 month"];
@@ -1177,7 +1179,7 @@ function openCaptionGenerator(room, partnerBiz, partnerId) {
     const btn = document.getElementById("capGenerateBtn");
     btn.disabled = true; btn.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> Generating...`;
     try {
-      const res = await fetch("/.netlify/functions/generate-caption", {
+      const res = await fetch(`${domain}/.netlify/functions/generate-caption`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1285,12 +1287,6 @@ function renderWorkspaceTab(container, room) {
     if (pEl) pEl.innerHTML = `<span class="${p.dot}"></span>${p.text}`;
   });
   state.unsub.push(unsubPartner);
-  
-  function genRedemptionCode(name) {
-  const base = (name || "PARTNER").replace(/[^a-zA-Z]/g, "").slice(0, 8).toUpperCase();
-  return (base || "PARTNER") + "10";
-}
-
 
   // ---------- Redemption Tracker ----------
   // Codes now require BOTH businesses to agree before going live — one side
@@ -1321,6 +1317,12 @@ function renderWorkspaceTab(container, room) {
       console.warn("AI code generation request failed, using fallback:", e);
     }
     // Fallback never blocks the flow — simpler, but always works.
+    
+      function genRedemptionCode(name) {
+  const base = (name || "PARTNER").replace(/[^a-zA-Z]/g, "").slice(0, 8).toUpperCase();
+  return (base || "PARTNER") + "10";
+}
+
     const codes = { [state.user.uid]: genRedemptionCode(state.business.name), [otherId]: genRedemptionCode(partnerBiz?.name) };
     if (codes[state.user.uid] === codes[otherId]) codes[otherId] += "B";
     return codes;
@@ -1448,54 +1450,47 @@ function renderWorkspaceTab(container, room) {
 
 function renderLaunchTab(container, room) {
   container.innerHTML = `
-    <h2 class="section-title">How it works (v1)</h2>
-    <div class="how-it-works">
-      <div class="step"><div class="box"><i class="fa-solid fa-store"></i></div><div class="label">Your Ad Account</div></div>
-      <div class="arrow"><i class="fa-solid fa-arrow-right"></i></div>
-      <div class="step"><div class="box"><i class="fa-solid fa-bullhorn"></i></div><div class="label">Same Creative, Partnership Ad</div></div>
-      <div class="arrow"><i class="fa-solid fa-arrow-right"></i></div>
-      <div class="step"><div class="box"><i class="fa-solid fa-house"></i></div><div class="label">Partner's Ad Account</div></div>
-    </div>
-    <div class="callout"><i class="fa-solid fa-shield-heart"></i><span>You run the ad. You pay Meta directly. Your partner does the same. adRoomie never touches your ad account or your money.</span></div>
+    <h2 class="section-title">🚀 Launch — the mobile-friendly way (Facebook/Instagram)</h2>
+    <div class="callout" style="margin-top:0;"><i class="fa-solid fa-shield-heart"></i><span>You each post and boost from your own Facebook pages/IG account(professional dashboard), personal profiles don't work— adRoomie never touches your money.</span></div>
 
-    <h2 class="section-title"><i class="fa-solid fa-clipboard-check"></i> Before you start</h2>
-    <div class="checklist-item"><span class="check"><i class="fa-solid fa-circle-check"></i></span>Each business needs its own Facebook Page (not just a personal profile).</div>
-    <div class="checklist-item"><span class="check"><i class="fa-solid fa-circle-check"></i></span>That Page should be connected to Meta Business Suite.</div>
-    <div class="checklist-item"><span class="check"><i class="fa-solid fa-circle-check"></i></span>Instagram account linked too, if you're running ads there as well.</div>
-    <a href="https://business.facebook.com" target="_blank" rel="noopener" class="btn btn-outline" style="margin-top:6px;">
-      <i class="fa-solid fa-arrow-up-right-from-square"></i> Open Meta Business Suite
-    </a>
-    <p class="hint">Don't have a Page yet? Meta Business Suite will walk you through creating one — it's free.</p>
-
-    <h2 class="section-title"><i class="fa-solid fa-people-arrows"></i> The two roles, explained</h2>
-    <p class="page-sub" style="margin-bottom:14px;">
-      Meta's Partnership Ads tool wasn't built with two equal businesses in mind — it's built around a "creator" tagging a "brand." To get the mirrored setup this room needs, <strong>each of you plays both roles once</strong>, tagging the other.
-    </p>
-    <div class="card" style="margin-bottom:10px;">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-        <div class="icon-wrap" style="width:28px;height:28px;font-size:12px;"><i class="fa-solid fa-tag"></i></div>
-        <strong style="font-size:13.5px;">Role 1 — Tagging your partner</strong>
+    <div class="launch-steps">
+      <div class="launch-step" style="--lc:#5B3FD9;">
+        <div class="launch-step-icon"><i class="fa-solid fa-camera"></i></div>
+        <div class="launch-step-num">1</div>
+        <div><h4>Post your shared creative</h4><p>Share it as a normal post or Reel.</p></div>
       </div>
-      <p class="hint" style="margin:0;">In Meta's settings, this is called being the "creator." You turn on branded content tools and tag your partner's Page as a paid partnership — this is what lets them include you in their ad.</p>
-    </div>
-    <div class="card" style="margin-bottom:16px;">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-        <div class="icon-wrap" style="width:28px;height:28px;font-size:12px;"><i class="fa-solid fa-rectangle-ad"></i></div>
-        <strong style="font-size:13.5px;">Role 2 — Building your own ad</strong>
+      <div class="launch-step" style="--lc:#E08A2E;">
+        <div class="launch-step-icon"><i class="fa-solid fa-user-tag"></i></div>
+        <div class="launch-step-num">2</div>
+        <div><h4>Tag your partner</h4><p>While creating the post, Tag people → Invite Collaborator → search and select only your partner's Page.</p></div>
       </div>
-      <p class="hint" style="margin:0;">Meta calls this the "brand" or "advertiser." You request partnership access to your partner's Page, they accept, and then you build and pay for your own ad using the shared creative, with their Page tagged alongside yours.</p>
+      <div class="launch-step" style="--lc:#1F8A6F;">
+        <div class="launch-step-icon"><i class="fa-solid fa-rocket"></i></div>
+        <div class="launch-step-num">3</div>
+        <div><h4>Boost it</h4><p>Only after they accept the collaboration invite,tap Boost Post, pay your half from your own account</p></div>
+      </div>
     </div>
 
-    <h2 class="section-title">Step by step</h2>
-    <div class="checklist-item"><span class="num">1</span>Both businesses turn on branded content / partnership tools for their Page (Meta Business Suite → Page settings).</div>
-    <div class="checklist-item"><span class="num">2</span>Each of you sends the other a partnership request — in Ads Manager, look for <strong>Partnership Ads Hub</strong> under "All tools."</div>
-    <div class="checklist-item"><span class="num">3</span>Accept each other's requests. This is the step that actually links your two Pages.</div>
-    <div class="checklist-item"><span class="num">4</span>Each business builds their own ad, using the shared creative from the Workspace tab, and selects their partner as the tagged identity.</div>
-    <div class="checklist-item"><span class="num">5</span>Publish. Each of you is now running your own ad, paid from your own account, with both Pages appearing on it.</div>
-    <div class="checklist-item"><span class="num">6</span>Share your ad link in Chat once live, so your partner can confirm theirs matches.</div>
+    <div class="mirror-note"><i class="fa-solid fa-arrows-rotate"></i> Your partner does these same 3 steps too — their own post, tagging you back.</div>
 
-    <p class="hint"><i class="fa-solid fa-circle-info"></i> Partnership Ad authorization codes expire — you may need to refresh them if the campaign runs long.</p>
-    <p class="hint"><i class="fa-solid fa-triangle-exclamation"></i> Meta renames and moves things fairly often. If a menu doesn't match exactly, search "Partnership Ads" inside Meta Business Suite's help — the concept above stays the same even when the button locations move.</p>
+    <h2 class="section-title">What this actually gets you</h2>
+    <div class="result-visual">
+      <div class="result-post" style="--rc:#5B3FD9;"><i class="fa-solid fa-image"></i><span>Your post</span></div>
+      <div class="result-arrow"><i class="fa-solid fa-arrow-right"></i></div>
+      <div class="result-both"><i class="fa-solid fa-users"></i><span>Both audiences</span></div>
+      <div class="result-arrow"><i class="fa-solid fa-arrow-left"></i></div>
+      <div class="result-post" style="--rc:#E08A2E;"><i class="fa-solid fa-image"></i><span>Their post</span></div>
+    </div>
+    <p class="hint" style="text-align:center;">Two posts, each boosted by its own owner, both reaching both audiences.</p>
+
+    <h2 class="section-title">Once it's live</h2>
+    <div class="checklist-item"><span class="check"><i class="fa-solid fa-circle-check"></i></span>Share your post link in Chat so your partner can confirm theirs is up too.</div>
+    <div class="checklist-item"><span class="check"><i class="fa-solid fa-circle-check"></i></span>Use your Workspace redemption codes to track who actually walks in.</div>
+
+    <details class="advanced-path">
+      <summary><i class="fa-solid fa-desktop"></i> Have desktop access? There's a more advanced option</summary>
+      <p class="hint">Meta's <strong>Partnership Ads Hub</strong> (Ads Manager → All Tools — desktop/browser only, not the mobile app) runs one shared post as a single ad from both accounts. More powerful, but needs Business Manager setup and Meta's approval flow. The 3 steps above work for almost everyone without any of that.</p>
+    </details>
   `;
 }
 
