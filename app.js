@@ -257,8 +257,10 @@ async function notifyPartner(playerId, message, title, url) {
 
 // Pings you directly whenever a business requests support — you go through the
 // same profile/OneSignal setup as everyone else, so this just reuses that.
+function location_origin() { return window.location.origin; }
 async function notifyAdmin(message, title, url) {
   if (!ADMIN_UID || ADMIN_UID === "YOUR_FIREBASE_AUTH_UID") return; // not configured yet
+  if (state.user && state.user.uid === ADMIN_UID) return; // don't ping yourself about your own actions
   const admin = await loadBusiness(ADMIN_UID);
   notifyPartner(admin?.oneSignalPlayerId, message, title, url);
 }
@@ -295,6 +297,7 @@ function renderConfirmButton(container, room, field, label, nextStatus, nextTab)
     room[field] = updated;
     if (updated.creator && updated.partner) {
       await updateDoc(doc(db, "rooms", room.id), { status: nextStatus });
+      notifyAdmin(`Room "${room.goal}" moved to ${nextStatus}`, "Room stage changed", `${location_origin()}/#/room/${room.id}/chat`);
       toast("Both confirmed — moving on!");
       go(`#/room/${room.id}/${nextTab}`);
     } else {
@@ -366,6 +369,7 @@ async function acceptRequest(roomId, requesterId) {
   await updateDoc(doc(db, "rooms", roomId), { partnerId: requesterId, status: "negotiating" });
   const partnerBiz = await loadBusiness(requesterId);
   notifyPartner(partnerBiz?.oneSignalPlayerId, "Your request was accepted — let's plan the campaign!", "Room confirmed", `${location.origin}/#/room/${roomId}/chat`);
+  notifyAdmin(`A partnership formed — ${partnerBiz?.name || "a business"} was accepted into a room`, "Partner accepted", `${location_origin()}/#/room/${roomId}/chat`);
   toast("Partner added — room is now negotiating.");
   go(`#/room/${roomId}/chat`);
 }
@@ -653,7 +657,9 @@ function renderProfile() {
       errorText.classList.add("show");
       return;
     }
+    const isNewProfile = !state.business?.name; // presence heartbeat can create a name-less stub doc first
     await setDoc(doc(db, "businesses", state.user.uid), {
+      ...(isNewProfile ? { createdAt: serverTimestamp() } : {}),
       uid: state.user.uid, name, category, location,
       audience: Array.from(selectedAudience), budgetRange,
       platforms: Array.from(selectedPlatforms), email: state.user.email,
@@ -666,6 +672,7 @@ function renderProfile() {
       updatedAt: serverTimestamp(),
     }, { merge: true });
     state.business = await loadBusiness(state.user.uid);
+    if (isNewProfile) notifyAdmin(`${name} (${category}, ${location}) just created a profile`, "New business profile", `${location_origin()}/#/admin`);
     toast("Profile saved!");
     go("#/rooms");
   };
@@ -929,6 +936,7 @@ function renderCreateRoom() {
       campaignPlan: { goal, duration, platforms: Array.from(selectedPlatforms), budgetSplit: "50/50" },
       creatives: [], createdAt: serverTimestamp(),
     });
+    notifyAdmin(`${state.business.name} created a room: "${goal}"`, "New room", `${location_origin()}/#/admin`);
     toast("Room created!");
     go(`#/room/${ref.id}`);
   };
@@ -1023,6 +1031,7 @@ function renderJoinRequest(roomId) {
     const roomSnap = await getDoc(doc(db, "rooms", roomId));
     const owner = await loadBusiness(roomSnap.data().createdBy);
     notifyPartner(owner?.oneSignalPlayerId, `${state.business.name} requested to join your room`, "New join request", `${location.origin}/#/room/${roomId}`);
+    notifyAdmin(`${state.business.name} requested to join "${roomSnap.data().goal}"`, "New join request", `${location_origin()}/#/admin`);
     toast("Request sent! Track it in your Inbox.");
     go("#/inbox");
   };
@@ -1662,90 +1671,286 @@ function renderWhatsNext() {
 
 // ============================================================
 // Screen: Admin Dashboard (visible only if admins/{uid} exists)
+// Live (onSnapshot) view of everything happening in the app during testing:
+// Activity feed, Businesses, Rooms, Requests, Support. Read volume is one
+// listener each on businesses / rooms / requests (collection group) /
+// supportRequests (collection group) — fine for free-tier at test scale.
+// Collection-group listeners are NOT ordered server-side (that would need
+// indexes); everything is sorted in the browser instead.
 // ============================================================
+function tsMillis(ts) {
+  if (!ts) return 0;
+  if (typeof ts.toMillis === "function") return ts.toMillis();
+  if (ts.seconds) return ts.seconds * 1000;
+  const n = new Date(ts).getTime();
+  return Number.isNaN(n) ? 0 : n;
+}
+function fmtDateTime(ms) {
+  if (!ms) return "—";
+  return new Date(ms).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+function timeAgo(ms) {
+  if (!ms) return "";
+  const m = (Date.now() - ms) / 60000;
+  if (m < 1) return "just now";
+  if (m < 60) return `${Math.round(m)}m ago`;
+  if (m < 1440) return `${Math.round(m / 60)}h ago`;
+  return `${Math.round(m / 1440)}d ago`;
+}
+const ROOM_STAGES = ["open", "negotiating", "confirmed", "running", "completed"];
+const ADMIN_SEEN_KEY = "adroomie_admin_seen_at";
+
 async function renderAdmin() {
   if (!state.isAdmin) { go("#/rooms"); return; }
   renderTopbar({ title: "Admin", back: true });
   renderBottomNav("profile");
   appEl.innerHTML = `
     <h1 class="page-title">Admin Dashboard</h1>
-    <p class="page-sub">Visible only to you — this is where the numbers and requests that don't show up anywhere else in the app actually live.</p>
-    <h2 class="section-title"><i class="fa-solid fa-trophy"></i> Partnership funnel</h2>
-    <div id="statsBlock">${loadingHTML("Loading stats…")}</div>
-    <h2 class="section-title"><i class="fa-solid fa-life-ring"></i> Support requests</h2>
-    <div id="supportFeed">${loadingHTML("Loading…")}</div>
-    <h2 class="section-title"><i class="fa-solid fa-layer-group"></i> All rooms</h2>
-    <div id="allRoomsList">${loadingHTML("Loading…")}</div>
-  `;
-
-  // --- Partnership funnel (the North Star metric, made visible) ---
-  const allRoomsSnap = await getDocs(collection(db, "rooms"));
-  const rooms = allRoomsSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
-  const counts = { open: 0, negotiating: 0, confirmed: 0, running: 0, completed: 0 };
-  rooms.forEach((r) => { if (counts[r.status] !== undefined) counts[r.status]++; });
-  const launched = counts.running + counts.completed;
-  document.getElementById("statsBlock").innerHTML = `
-    <div class="card">
-      <div class="checklist-item"><span class="check"><i class="fa-solid fa-trophy"></i></span>
-        <span><strong>${launched}</strong> room${launched === 1 ? "" : "s"} reached a launched campaign — your North Star number</span>
-      </div>
-      <div class="meta-line" style="margin-top:6px;">
-        Open: ${counts.open} · Negotiating: ${counts.negotiating} · Confirmed: ${counts.confirmed} · Running: ${counts.running} · Completed: ${counts.completed}
-      </div>
+    <p class="page-sub">Live view of everything happening on adRoomie. Updates on its own — no refresh needed.</p>
+    <div id="adminStats">${loadingHTML("Loading…")}</div>
+    <div class="filter-tabs" id="adminTabs">
+      <button class="filter-tab active" data-t="activity">Activity</button>
+      <button class="filter-tab" data-t="businesses">Businesses</button>
+      <button class="filter-tab" data-t="rooms">Rooms</button>
+      <button class="filter-tab" data-t="requests">Requests</button>
+      <button class="filter-tab" data-t="support">Support</button>
     </div>
+    <div id="adminBody">${loadingHTML("Loading…")}</div>
   `;
 
-  // --- Support requests, aggregated across every room (the thing that was going into a void) ---
-  const feedEl = document.getElementById("supportFeed");
-  try {
-    const supSnap = await getDocs(query(collectionGroup(db, "supportRequests"), orderBy("createdAt", "desc")));
-    if (!supSnap.docs.length) {
-      feedEl.innerHTML = `<p class="hint">No support requests yet.</p>`;
-    } else {
-      const items = await Promise.all(supSnap.docs.map(async (d) => {
-        const data = d.data();
-        const roomId = d.ref.parent.parent.id;
-        const roomSnap = await getDoc(doc(db, "rooms", roomId));
-        const biz = await loadBusiness(data.requestedBy);
-        return { ...data, roomId, roomGoal: roomSnap.exists() ? roomSnap.data().goal : "Room", bizName: biz?.name };
-      }));
-      const iconMap = { moderator: "fa-user-tie", checkin: "fa-calendar-check", issue: "fa-triangle-exclamation" };
-      feedEl.innerHTML = items.map((it) => `
-        <div class="card room-card" data-room="${it.roomId}">
-          <div class="thumb"><i class="fa-solid ${iconMap[it.type] || "fa-bell"}"></i></div>
-          <div class="info">
-            <div class="row-top"><h3 style="text-transform:capitalize;">${esc(it.type)}</h3></div>
-            <div class="meta-line">${esc(it.bizName || "Someone")} · "${esc(it.roomGoal)}"</div>
-            ${it.note ? `<div class="meta-line">"${esc(it.note)}"</div>` : ""}
-          </div>
-        </div>`).join("");
-      feedEl.querySelectorAll(".room-card").forEach((c) => { c.onclick = () => go(`#/room/${c.dataset.room}/chat`); });
-    }
-  } catch (e) {
-    // Same two possible causes as the Inbox sent-requests query:
-    // 1) failed-precondition — this query needs a composite index (collectionGroup
-    //    + orderBy always does). Firestore's console error includes a direct
-    //    "create index" link — click it once, done forever.
-    // 2) permission-denied — a firestore.rules issue, not an index issue.
-    const isIndexIssue = e?.code === "failed-precondition";
-    feedEl.innerHTML = isIndexIssue
-      ? `<p class="hint">Can't load yet — check the browser console for a Firestore index link (one-time setup).</p>`
-      : `<p class="hint">Can't load support requests right now — there's a permissions issue, not an index issue.</p>`;
-    console.warn(`Admin support feed failed (${e?.code || "unknown"}):`, e);
+  const data = { businesses: [], rooms: [], requests: [], support: [], supportError: null };
+  const ui = { tab: "activity", roomSort: "newest", roomStage: "all", bizSort: "newest", bizSearch: "" };
+  let lastSeen = 0;
+  try { lastSeen = Number(localStorage.getItem(ADMIN_SEEN_KEY)) || 0; } catch (e) {}
+
+  const bizById = () => Object.fromEntries(data.businesses.map((b) => [b.id, b]));
+  const roomById = () => Object.fromEntries(data.rooms.map((r) => [r.id, r]));
+  const bizCreatedMs = (b) => tsMillis(b.createdAt) || tsMillis(b.updatedAt) || 0; // older profiles have no createdAt
+
+  document.querySelectorAll("#adminTabs .filter-tab").forEach((t) => {
+    t.onclick = () => {
+      document.querySelectorAll("#adminTabs .filter-tab").forEach((x) => x.classList.remove("active"));
+      t.classList.add("active"); ui.tab = t.dataset.t; draw();
+    };
+  });
+
+  const listen = (q, onData, onErr) => state.unsub.push(onSnapshot(q, (snap) => { onData(snap); draw(); }, (e) => { console.warn("Admin listener failed:", e); if (onErr) onErr(e); draw(); }));
+  listen(collection(db, "businesses"), (s) => { data.businesses = s.docs.map((d) => ({ id: d.id, ...d.data() })).filter((b) => b.name); }); // skip name-less presence stubs
+  listen(collection(db, "rooms"), (s) => { data.rooms = s.docs.map((d) => ({ id: d.id, ...d.data() })); });
+  listen(collectionGroup(db, "requests"), (s) => { data.requests = s.docs.map((d) => ({ id: d.id, roomId: d.ref.parent.parent.id, ...d.data() })); });
+  listen(collectionGroup(db, "supportRequests"), (s) => {
+    data.support = s.docs.map((d) => ({ id: d.id, roomId: d.ref.parent.parent.id, ...d.data() }));
+    data.supportError = null;
+  }, (e) => { data.supportError = e?.code || "unknown"; });
+
+  function statsHTML() {
+    const counts = Object.fromEntries(ROOM_STAGES.map((s) => [s, 0]));
+    data.rooms.forEach((r) => { if (counts[r.status] !== undefined) counts[r.status]++; });
+    const launched = counts.running + counts.completed;
+    const pending = data.requests.filter((r) => r.status === "pending").length;
+    const activeNow = data.businesses.filter((b) => presenceLabel(b.lastActiveAt).dot === "active-dot").length;
+    const newSince = [...data.businesses.map(bizCreatedMs), ...data.rooms.map((r) => tsMillis(r.createdAt))].filter((ms) => ms > lastSeen).length;
+    return `
+      <div class="card">
+        <div class="checklist-item"><span class="check"><i class="fa-solid fa-trophy"></i></span>
+          <span><strong>${launched}</strong> room${launched === 1 ? "" : "s"} reached a launched campaign — your North Star number</span></div>
+        <div class="meta-line" style="margin-top:6px;">
+          ${data.businesses.length} businesses (${activeNow} active now) · ${data.rooms.length} rooms · ${pending} pending request${pending === 1 ? "" : "s"}
+        </div>
+        <div class="meta-line">Open ${counts.open} · Negotiating ${counts.negotiating} · Confirmed ${counts.confirmed} · Running ${counts.running} · Completed ${counts.completed}</div>
+        ${newSince ? `<div class="meta-line"><strong>${newSince}</strong> new profile/room event${newSince === 1 ? "" : "s"} since you last looked <button class="btn btn-outline" id="markSeenBtn" style="padding:2px 10px;margin-left:6px;">Mark seen</button></div>` : ""}
+      </div>`;
   }
 
-  // --- Every room, regardless of who owns it ---
-  document.getElementById("allRoomsList").innerHTML = rooms.map((r) => `
-    <div class="card room-card" data-id="${r.id}">
-      <div class="thumb"><i class="fa-solid fa-store"></i></div>
-      <div class="info">
-        <div class="row-top"><h3>${esc(r.goal)}</h3><span class="status-pill status-${r.status}">${r.status}</span></div>
-        <div class="meta-line"><i class="fa-solid fa-location-dot"></i>${esc(r.location || "")}</div>
+  // ---- Activity feed: everything, newest first, built from the live data ----
+  function activityItems() {
+    const bz = bizById(), rm = roomById();
+    const items = [];
+    data.businesses.forEach((b) => items.push({ ms: bizCreatedMs(b), icon: "fa-store", title: "New business profile", text: `${b.name || "Unnamed"} · ${b.category || "—"} · ${b.location || "—"}`, tab: "businesses" }));
+    data.rooms.forEach((r) => items.push({ ms: tsMillis(r.createdAt), icon: "fa-people-roof", title: "Room created", text: `"${r.goal}" by ${bz[r.createdBy]?.name || "Someone"} — now ${r.status}`, room: r.id }));
+    data.requests.forEach((q) => items.push({ ms: tsMillis(q.createdAt), icon: "fa-paper-plane", title: `Join request (${q.status})`, text: `${bz[q.requesterId]?.name || "Someone"} → "${rm[q.roomId]?.goal || "room"}"`, room: q.roomId }));
+    data.support.forEach((s) => items.push({ ms: tsMillis(s.createdAt), icon: "fa-life-ring", title: `Support: ${s.type}`, text: `${bz[s.requestedBy]?.name || "Someone"} · "${rm[s.roomId]?.goal || "room"}"${s.note ? ` — ${s.note}` : ""}`, room: s.roomId, chat: true }));
+    return items.filter((i) => i.ms).sort((a, b) => b.ms - a.ms).slice(0, 60);
+  }
+  function activityHTML() {
+    const items = activityItems();
+    if (!items.length) return `<p class="hint">Nothing has happened yet.</p>`;
+    return items.map((i) => `
+      <div class="card room-card admin-act" ${i.room ? `data-room="${i.room}" data-chat="${i.chat ? 1 : 0}"` : `data-tab="${i.tab || ""}"`}>
+        <div class="thumb"><i class="fa-solid ${i.icon}"></i></div>
+        <div class="info">
+          <div class="row-top"><h3>${esc(i.title)}</h3><span class="meta-line">${esc(timeAgo(i.ms))}</span></div>
+          <div class="meta-line">${esc(i.text)}</div>
+          <div class="meta-line">${esc(fmtDateTime(i.ms))}</div>
+        </div>
+      </div>`).join("");
+  }
+
+  // ---- Businesses ----
+  function businessesHTML() {
+    const rm = data.rooms;
+    let list = data.businesses.map((b) => ({
+      ...b, _created: bizCreatedMs(b), _active: tsMillis(b.lastActiveAt),
+      _rooms: rm.filter((r) => r.createdBy === b.id).length, _joined: rm.filter((r) => r.partnerId === b.id).length,
+      _sent: data.requests.filter((q) => q.requesterId === b.id).length,
+    }));
+    const s = ui.bizSearch;
+    if (s) list = list.filter((b) => `${b.name} ${b.category} ${b.location} ${b.email}`.toLowerCase().includes(s));
+    const sorters = { newest: (a, b) => b._created - a._created, active: (a, b) => b._active - a._active, rooms: (a, b) => b._rooms - a._rooms };
+    list.sort(sorters[ui.bizSort]);
+    return `
+      <div class="search-bar"><i class="fa-solid fa-magnifying-glass"></i><input id="bizSearch" placeholder="Search name, category, location, email" value="${esc(ui.bizSearch)}"></div>
+      <div class="field"><select id="bizSort">
+        <option value="newest" ${ui.bizSort === "newest" ? "selected" : ""}>Newest first</option>
+        <option value="active" ${ui.bizSort === "active" ? "selected" : ""}>Recently active</option>
+        <option value="rooms" ${ui.bizSort === "rooms" ? "selected" : ""}>Most rooms</option></select></div>
+      <p class="hint">${list.length} business${list.length === 1 ? "" : "es"}. Profiles created before this update show their last-saved date.</p>
+      ${list.map((b) => {
+        const p = presenceLabel(b.lastActiveAt);
+        const wa = b.phone ? `https://wa.me/${String(b.phone).replace(/[^0-9]/g, "")}` : "";
+        return `
+        <div class="card" data-biz="${b.id}">
+          <div class="row-top"><h3>${esc(b.name || "Unnamed")}</h3><span class="meta-line"><span class="${p.dot}"></span> ${esc(p.text)}</span></div>
+          <div class="meta-line">${esc(b.category || "—")} · ${esc(b.location || "—")} · ${esc(b.budgetRange || "—")}</div>
+          <div class="meta-line">Joined ${esc(fmtDateTime(b._created))} · ${b.emailVerified ? "email verified" : "email NOT verified"}</div>
+          <div class="meta-line">${b._rooms} room${b._rooms === 1 ? "" : "s"} created · ${b._joined} joined · ${b._sent} request${b._sent === 1 ? "" : "s"} sent</div>
+          <div class="meta-line">${esc((b.audience || []).join(", "))} · ${esc((b.platforms || []).join(", "))}</div>
+          <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">
+            <button class="btn btn-outline" data-push="${b.id}" ${b.oneSignalPlayerId ? "" : "disabled title=\"No push token yet\""} style="padding:4px 12px;"><i class="fa-solid fa-bell"></i> Push</button>
+            ${wa ? `<a class="btn btn-outline" href="${wa}" target="_blank" rel="noopener" style="padding:4px 12px;"><i class="fa-brands fa-whatsapp"></i> WhatsApp</a>` : ""}
+            ${b.email ? `<a class="btn btn-outline" href="mailto:${esc(b.email)}" style="padding:4px 12px;"><i class="fa-solid fa-envelope"></i> Email</a>` : ""}
+          </div>
+        </div>`;
+      }).join("")}`;
+  }
+
+  // ---- Rooms ----
+  function roomsHTML() {
+    const bz = bizById();
+    let list = data.rooms.map((r) => ({
+      ...r, _created: tsMillis(r.createdAt),
+      _pending: data.requests.filter((q) => q.roomId === r.id && q.status === "pending").length,
+      _reqs: data.requests.filter((q) => q.roomId === r.id).length,
+    }));
+    if (ui.roomStage !== "all") list = list.filter((r) => r.status === ui.roomStage);
+    if (ui.roomSort === "newest") list.sort((a, b) => b._created - a._created);
+    else if (ui.roomSort === "oldest") list.sort((a, b) => a._created - b._created);
+    else list.sort((a, b) => ROOM_STAGES.indexOf(b.status) - ROOM_STAGES.indexOf(a.status) || b._created - a._created);
+    return `
+      <div style="display:flex;gap:8px;">
+        <div class="field" style="flex:1;"><select id="roomSort">
+          <option value="newest" ${ui.roomSort === "newest" ? "selected" : ""}>Newest first</option>
+          <option value="oldest" ${ui.roomSort === "oldest" ? "selected" : ""}>Oldest first</option>
+          <option value="stage" ${ui.roomSort === "stage" ? "selected" : ""}>Furthest stage first</option></select></div>
+        <div class="field" style="flex:1;"><select id="roomStage">
+          <option value="all">All stages</option>
+          ${ROOM_STAGES.map((s) => `<option value="${s}" ${ui.roomStage === s ? "selected" : ""}>${s}</option>`).join("")}</select></div>
       </div>
-    </div>`).join("");
-  document.getElementById("allRoomsList").querySelectorAll(".room-card").forEach((c) => {
-    c.onclick = () => go(`#/room/${c.dataset.id}/chat`);
-  });
+      <p class="hint">${list.length} room${list.length === 1 ? "" : "s"}</p>
+      ${list.map((r) => `
+        <div class="card" data-roomcard="${r.id}">
+          <div class="row-top"><h3>${esc(r.goal)}</h3><span class="status-pill status-${r.status}">${esc(r.status)}</span></div>
+          <div class="meta-line">By <strong>${esc(bz[r.createdBy]?.name || "Unknown")}</strong> · partner: ${r.partnerId ? `<strong>${esc(bz[r.partnerId]?.name || "Unknown")}</strong>` : "none yet"}</div>
+          <div class="meta-line">Looking for: ${esc((r.partnerType || []).join(", ") || "any")} · ${esc(r.location || "")} · ${esc(r.budgetRange || "")}</div>
+          <div class="meta-line">Created ${esc(fmtDateTime(r._created))} · ${r._reqs} request${r._reqs === 1 ? "" : "s"} (${r._pending} pending)</div>
+          <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;align-items:center;">
+            <button class="btn btn-outline" data-open="${r.id}" style="padding:4px 12px;"><i class="fa-solid fa-comments"></i> Open</button>
+            <select data-stage="${r.id}" style="padding:4px;">
+              ${ROOM_STAGES.map((s) => `<option value="${s}" ${r.status === s ? "selected" : ""}>${s}</option>`).join("")}
+            </select>
+          </div>
+        </div>`).join("")}`;
+  }
+
+  // ---- Requests ----
+  function requestsHTML() {
+    const bz = bizById(), rm = roomById();
+    const list = [...data.requests].sort((a, b) => tsMillis(b.createdAt) - tsMillis(a.createdAt));
+    if (!list.length) return `<p class="hint">No join requests yet.</p>`;
+    return list.map((q) => `
+      <div class="card room-card" data-room="${q.roomId}">
+        <div class="info">
+          <div class="row-top"><h3>${esc(bz[q.requesterId]?.name || "Someone")}</h3><span class="status-pill status-${q.status}">${esc(q.status)}</span></div>
+          <div class="meta-line">→ "${esc(rm[q.roomId]?.goal || "room")}" (owner: ${esc(bz[rm[q.roomId]?.createdBy]?.name || "?")})</div>
+          ${q.message ? `<div class="meta-line">"${esc(q.message)}"</div>` : ""}
+          <div class="meta-line">${esc(fmtDateTime(tsMillis(q.createdAt)))}</div>
+        </div>
+      </div>`).join("");
+  }
+
+  // ---- Support ----
+  function supportHTML() {
+    if (data.supportError) {
+      return data.supportError === "failed-precondition"
+        ? `<p class="hint">Can't load yet — check the browser console for a Firestore index link.</p>`
+        : `<p class="hint">Can't load support requests — permissions issue (${esc(data.supportError)}).</p>`;
+    }
+    const bz = bizById(), rm = roomById();
+    const iconMap = { moderator: "fa-user-tie", checkin: "fa-calendar-check", issue: "fa-triangle-exclamation" };
+    const list = [...data.support].sort((a, b) => tsMillis(b.createdAt) - tsMillis(a.createdAt));
+    if (!list.length) return `<p class="hint">No support requests yet.</p>`;
+    return list.map((it) => `
+      <div class="card room-card" data-room="${it.roomId}" data-chat="1">
+        <div class="thumb"><i class="fa-solid ${iconMap[it.type] || "fa-bell"}"></i></div>
+        <div class="info">
+          <div class="row-top"><h3 style="text-transform:capitalize;">${esc(it.type)}</h3><span class="meta-line">${esc(timeAgo(tsMillis(it.createdAt)))}</span></div>
+          <div class="meta-line">${esc(bz[it.requestedBy]?.name || "Someone")} · "${esc(rm[it.roomId]?.goal || "Room")}"</div>
+          ${it.note ? `<div class="meta-line">"${esc(it.note)}"</div>` : ""}
+        </div>
+      </div>`).join("");
+  }
+
+  function draw() {
+    const body = document.getElementById("adminBody");
+    const statsEl = document.getElementById("adminStats");
+    if (!body || !statsEl) return; // navigated away
+    // Don't blow away a search box while the admin is typing in it.
+    if (document.activeElement && document.activeElement.id === "bizSearch") { statsEl.innerHTML = statsHTML(); return; }
+    statsEl.innerHTML = statsHTML();
+    const seenBtn = document.getElementById("markSeenBtn");
+    if (seenBtn) seenBtn.onclick = () => { lastSeen = Date.now(); try { localStorage.setItem(ADMIN_SEEN_KEY, String(lastSeen)); } catch (e) {} draw(); };
+    body.innerHTML = { activity: activityHTML, businesses: businessesHTML, rooms: roomsHTML, requests: requestsHTML, support: supportHTML }[ui.tab]();
+
+    body.querySelectorAll("[data-room]").forEach((c) => { c.onclick = () => go(`#/room/${c.dataset.room}${c.dataset.chat === "1" ? "/chat" : ""}`); });
+    body.querySelectorAll("[data-tab]").forEach((c) => { c.onclick = () => { if (!c.dataset.tab) return; ui.tab = c.dataset.tab; document.querySelectorAll("#adminTabs .filter-tab").forEach((x) => x.classList.toggle("active", x.dataset.t === ui.tab)); draw(); }; });
+    const bs = document.getElementById("bizSearch");
+    if (bs) bs.oninput = (e) => { ui.bizSearch = e.target.value.toLowerCase(); const pos = e.target.selectionStart; draw(); const n = document.getElementById("bizSearch"); n.focus(); n.setSelectionRange(pos, pos); };
+    const bso = document.getElementById("bizSort"); if (bso) bso.onchange = (e) => { ui.bizSort = e.target.value; draw(); };
+    const rs = document.getElementById("roomSort"); if (rs) rs.onchange = (e) => { ui.roomSort = e.target.value; draw(); };
+    const rg = document.getElementById("roomStage"); if (rg) rg.onchange = (e) => { ui.roomStage = e.target.value; draw(); };
+
+    body.querySelectorAll("[data-open]").forEach((b) => { b.onclick = () => go(`#/room/${b.dataset.open}/chat`); });
+    // Admin override of a room's stage — logged to the room chat's data only via the status change itself.
+    body.querySelectorAll("[data-stage]").forEach((sel) => {
+      sel.onchange = async () => {
+        const room = data.rooms.find((r) => r.id === sel.dataset.stage);
+        const next = sel.value;
+        if (!room || next === room.status) return;
+        if (!confirm(`Force "${room.goal}" from ${room.status} to ${next}? This overrides the partners' own confirmations.`)) { sel.value = room.status; return; }
+        try { await updateDoc(doc(db, "rooms", room.id), { status: next }); toast(`Stage set to ${next}`); }
+        catch (e) { toast("Couldn't change stage — check Firestore rules."); sel.value = room.status; }
+      };
+    });
+    body.querySelectorAll("[data-push]").forEach((btn) => {
+      btn.onclick = () => {
+        const b = data.businesses.find((x) => x.id === btn.dataset.push);
+        if (!b) return;
+        showModal(`
+          <h3>Push to ${esc(b.name)}</h3>
+          <div class="field"><textarea id="pushMsg" rows="3" placeholder="Message…"></textarea></div>
+          <button class="btn btn-primary" id="pushSend">Send</button>
+          <button class="btn btn-outline" id="pushCancel" style="margin-top:8px;">Cancel</button>`);
+        document.getElementById("pushCancel").onclick = closeModal;
+        document.getElementById("pushSend").onclick = async () => {
+          const msg = document.getElementById("pushMsg").value.trim();
+          if (!msg) return;
+          await notifyPartner(b.oneSignalPlayerId, msg, "adRoomie", `${location.origin}/#/rooms`);
+          closeModal(); toast("Push sent");
+        };
+      };
+    });
+  }
+  draw();
 }
 
 // ============================================================
