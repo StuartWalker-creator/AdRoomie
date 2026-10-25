@@ -39,7 +39,7 @@ const ONESIGNAL_APP_ID = "a0bcdf64-4d1a-4360-bc6e-1e01d14c6e5f";
 const ADMIN_UID = "SLIWNQz3e3hGPKMzGhfrTgMUFve2";
 // ---------------------------------------------------------
 
-const domain = window.location.origin
+const domain = window.location.origin;
 
 const CATEGORY_OPTIONS = ["Restaurant / Cafe","Bakery","Fitness / Health","Retail","Electronics/Gadgets","Homeware","Education","Beauty & Wellness","Services","Other"];
 const BUDGET_OPTIONS = ["UGX 100,000 - 300,000","UGX 300,000 - 500,000","UGX 500,000 - 800,000","UGX 800,000+"];
@@ -303,23 +303,45 @@ function renderConfirmButton(container, room, field, label, nextStatus, nextTab)
   };
 }
 
-// Simple rule-based match score (no AI) — approximates the blueprint's weights:
-// Audience 40 / Industry 25 / Location 15 / Budget 10 / Platform 10.
-// "Complementary industry" uses a placeholder heuristic (different category = good)
-// until a real industry-pairing table exists — flagged as an open item.
-function matchScore(business, room) {
+// Simple rule-based match score (no AI) — a heuristic, NOT a probability of a
+// successful collaboration. Weights: Audience 40 / Partner fit 25 / Location 15
+// / Budget 10 / Platform 10.
+// Partner fit uses the room creator's own "partnerType" choice: if they named
+// the kinds of business they want, only a business in one of those categories
+// earns the 25 points. If they left it open ("Any compatible business"), it
+// falls back to the old placeholder (different category from the creator = ok)
+// at a lower weight, since nothing was actually requested.
+function matchDetails(business, room) {
   let score = 0;
+  const reasons = [];
+  const wanted = room.partnerType || [];
+  const partnerSpecified = wanted.length > 0;
+  const partnerMatch = partnerSpecified && wanted.includes(business.category);
+
   const bAud = new Set(business.audience || []);
   const rAud = new Set(room.audience || []);
   const overlap = [...bAud].filter((a) => rAud.has(a)).length;
   const audienceRatio = bAud.size ? overlap / Math.max(1, Math.min(bAud.size, rAud.size)) : 0;
   score += audienceRatio * 40;
-  score += (business.category && room.creatorCategory && business.category !== room.creatorCategory) ? 25 : 8;
-  score += (business.location && room.location && business.location.toLowerCase() === room.location.toLowerCase()) ? 15 : 0;
-  score += (business.budgetRange === room.budgetRange) ? 10 : 4;
-  score += (business.platforms || []).some((p) => (room.platforms || []).includes(p)) ? 10 : 0;
-  return Math.max(0, Math.min(100, Math.round(score)));
+  if (overlap > 0) reasons.push("Shared target audience");
+
+  if (partnerSpecified) {
+    if (partnerMatch) { score += 25; reasons.push("Matches the partner type requested"); }
+  } else if (business.category && room.creatorCategory && business.category !== room.creatorCategory) {
+    score += 12; reasons.push("Different category — open to any partner");
+  }
+
+  if (business.location && room.location && business.location.toLowerCase() === room.location.toLowerCase()) {
+    score += 15; reasons.push("Same location");
+  }
+  if (business.budgetRange === room.budgetRange) { score += 10; reasons.push("Same budget range"); }
+  else score += 4;
+  if ((business.platforms || []).some((p) => (room.platforms || []).includes(p))) {
+    score += 10; reasons.push("Uses a shared ad platform");
+  }
+  return { score: Math.max(0, Math.min(100, Math.round(score))), reasons, partnerSpecified, partnerMatch };
 }
+function matchScore(business, room) { return matchDetails(business, room).score; }
 
 // ============================================================
 // Auth
@@ -726,8 +748,9 @@ function renderExplore() {
   state.unsub.push(unsub);
 
   function draw() {
-    let rooms = allRooms.map((r) => ({ ...r, _score: matchScore(state.business, r) }));
-    if (filter === "recommended") rooms = rooms.filter((r) => r._score >= 50).sort((a, b) => b._score - a._score);
+    let rooms = allRooms.map((r) => { const m = matchDetails(state.business, r); return { ...r, _score: m.score, _reasons: m.reasons, _partnerOk: !m.partnerSpecified || m.partnerMatch }; });
+    // Recommended: if the room asked for specific partner types, you must be one of them.
+    if (filter === "recommended") rooms = rooms.filter((r) => r._partnerOk && r._score >= 50).sort((a, b) => b._score - a._score);
     if (filter === "nearby") rooms = rooms.filter((r) => (r.location || "").toLowerCase() === (state.business.location || "").toLowerCase());
     if (searchTerm) rooms = rooms.filter((r) => (r.goal + " " + (r.audience || []).join(" ")).toLowerCase().includes(searchTerm));
     const list = document.getElementById("roomList");
@@ -743,6 +766,7 @@ function renderExplore() {
           <div class="tag-row">${(r.platforms || []).map((p) => `<span class="tag"><i class="${platformIcon(p)}"></i> ${p}</span>`).join("")}</div>
           <div class="meta-line"><i class="fa-solid fa-sack-dollar"></i>${esc(r.budgetRange || "—")}</div>
           <div class="meta-line"><i class="fa-solid fa-location-dot"></i>${esc(r.location || "")}</div>
+          ${r._reasons.length ? `<div class="meta-line"><i class="fa-solid fa-circle-check"></i>${esc(r._reasons.slice(0, 2).join(" · "))}</div>` : ""}
         </div>
       </div>`).join("");
     list.querySelectorAll(".room-card").forEach((c) => { c.onclick = () => go(`#/room/${c.dataset.id}`); });
@@ -924,7 +948,8 @@ async function renderRoomDetails(roomId) {
   const isPartner = room.partnerId === state.user.uid;
   if (isPartner || (isOwner && room.status !== "open")) { go(`#/room/${roomId}/chat`); return; }
 
-  const score = matchScore(state.business, room);
+  const match = matchDetails(state.business, room);
+  const score = match.score;
   appEl.innerHTML = `
     <div class="room-hero"><i class="fa-solid fa-bullhorn"></i><span class="badge-overlay match-badge" style="position:absolute;top:10px;right:10px;"><i class="fa-solid fa-bullseye"></i>${score}%</span></div>
     <h1 class="page-title">${esc(room.goal)}</h1>
@@ -933,6 +958,7 @@ async function renderRoomDetails(roomId) {
     <div class="detail-block"><h4><i class="fa-solid fa-sack-dollar"></i> Budget Range</h4><p>${esc(room.budgetRange)} (each partner)</p></div>
     <div class="detail-block"><h4><i class="fa-solid fa-calendar-days"></i> Campaign Duration</h4><p>${esc(room.duration)}</p></div>
     <div class="detail-block"><h4><i class="fa-solid fa-magnifying-glass"></i> Looking For</h4><p>${esc((room.partnerType || []).join(", ") || "Any compatible business")}</p></div>
+    ${!isOwner ? `<div class="detail-block"><h4><i class="fa-solid fa-bullseye"></i> Why this match (${score}% — a guide, not a guarantee)</h4><p>${match.reasons.length ? match.reasons.map(esc).join("<br>") : "No strong overlap with your profile."}${match.partnerSpecified && !match.partnerMatch ? "<br>Your category isn't one this room asked for." : ""}</p></div>` : ""}
     <div class="detail-block"><h4><i class="fa-solid fa-location-dot"></i> Location</h4><p>${esc(room.location)}</p></div>
     ${isOwner ? `
       <button class="btn btn-outline" id="inviteBtn" style="width:100%;margin-bottom:16px;"><i class="fa-solid fa-share-nodes"></i> Invite a Business to This Room</button>
@@ -1295,6 +1321,15 @@ function renderWorkspaceTab(container, room) {
   // customer redeems the PARTNER's code at YOUR shop, you tap +1 — crediting
   // THEM, not yourself. Neither business has any incentive to inflate a
   // count, since tapping the button only benefits the other side.
+  //
+  // genRedemptionCode is the deterministic fallback used below if the AI
+  // call fails for any reason — simpler codes, but the feature never blocks
+  // on network/API availability.
+  function genRedemptionCode(name) {
+    const base = (name || "PARTNER").replace(/[^a-zA-Z]/g, "").slice(0, 8).toUpperCase();
+    return (base || "PARTNER") + "10";
+  }
+
   async function proposeTrackerCodes(partnerBiz) {
     try {
       const res = await fetch(`${domain}/.netlify/functions/generate-codes`, {
@@ -1317,12 +1352,6 @@ function renderWorkspaceTab(container, room) {
       console.warn("AI code generation request failed, using fallback:", e);
     }
     // Fallback never blocks the flow — simpler, but always works.
-    
-      function genRedemptionCode(name) {
-  const base = (name || "PARTNER").replace(/[^a-zA-Z]/g, "").slice(0, 8).toUpperCase();
-  return (base || "PARTNER") + "10";
-}
-
     const codes = { [state.user.uid]: genRedemptionCode(state.business.name), [otherId]: genRedemptionCode(partnerBiz?.name) };
     if (codes[state.user.uid] === codes[otherId]) codes[otherId] += "B";
     return codes;
@@ -1467,7 +1496,7 @@ function renderLaunchTab(container, room) {
       <div class="launch-step" style="--lc:#1F8A6F;">
         <div class="launch-step-icon"><i class="fa-solid fa-rocket"></i></div>
         <div class="launch-step-num">3</div>
-        <div><h4>Boost it</h4><p>Only after they accept the collaboration invite,tap Boost Post, pay your half from your own account</p></div>
+        <div><h4>Boost it</h4><p>Only after they accept the collaboration invite — tap Boost Post, pay your half from your own account.</p></div>
       </div>
     </div>
 
