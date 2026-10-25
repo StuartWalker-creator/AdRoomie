@@ -593,6 +593,10 @@ function renderProfile() {
         ${CATEGORY_OPTIONS.map((c) => `<option ${b.category === c ? "selected" : ""}>${c}</option>`).join("")}
       </select>
     </div>
+    <div class="field"><label>What does your business do?</label>
+      <textarea id="description" rows="3" maxlength="300" placeholder="e.g. We bake custom cakes and cupcakes for birthdays and weddings in Kyengera.">${esc(b.description || "")}</textarea>
+      <p class="hint">A line or two about your products or services — it helps us find you the right partner.</p>
+    </div>
     <div class="field"><label>Location</label><input id="location" value="${esc(b.location)}" placeholder="e.g. Kampala, Uganda"></div>
     <div class="field"><label>Phone Contact</label>
       <input id="phoneInput" value="${esc(b.phone || "")}" placeholder="e.g. 0755 123456">
@@ -651,8 +655,9 @@ function renderProfile() {
     const name = document.getElementById("name").value.trim();
     const category = document.getElementById("category").value;
     const location = document.getElementById("location").value.trim();
+    const description = document.getElementById("description").value.trim();
     const budgetRange = document.getElementById("budget").value;
-    if (!name || !category || !location || !budgetRange || selectedPlatforms.size === 0 || selectedAudience.size === 0) {
+    if (!name || !category || !description || !location || !budgetRange || selectedPlatforms.size === 0 || selectedAudience.size === 0) {
       errorText.textContent = "Please fill in every field, and pick at least one audience and platform.";
       errorText.classList.add("show");
       return;
@@ -660,7 +665,7 @@ function renderProfile() {
     const isNewProfile = !state.business?.name; // presence heartbeat can create a name-less stub doc first
     await setDoc(doc(db, "businesses", state.user.uid), {
       ...(isNewProfile ? { createdAt: serverTimestamp() } : {}),
-      uid: state.user.uid, name, category, location,
+      uid: state.user.uid, name, category, description, location,
       audience: Array.from(selectedAudience), budgetRange,
       platforms: Array.from(selectedPlatforms), email: state.user.email,
       emailVerified: state.user.emailVerified,
@@ -816,10 +821,12 @@ async function renderInbox() {
     if (!allPending.length) { incomingEl.innerHTML = `<p class="hint">No pending requests right now.</p>`; return; }
     incomingEl.innerHTML = allPending.map((r) => `
       <div class="card">
+        <p class="meta-line" style="font-weight:600;color:var(--accent);"><i class="fa-solid fa-bullseye"></i> We found you a potential match for your ad room</p>
         <div class="partner-row">
           ${avatarHTML(r.business, "sm")}
           <div class="info"><div class="name">${esc(r.business?.name)}</div><div class="sub">wants to join "${esc(r.roomGoal)}"</div></div>
         </div>
+        ${r.business?.description ? `<p class="meta-line">${esc(r.business.description)}</p>` : ""}
         ${r.message ? `<p class="meta-line">"${esc(r.message)}"</p>` : ""}
         <div style="display:flex;gap:8px;margin-top:10px;">
           <button class="btn btn-primary btn-sm" data-room="${r.roomId}" data-req="${r.requesterId}" data-a="accept"><i class="fa-solid fa-check"></i> Accept</button>
@@ -937,8 +944,14 @@ function renderCreateRoom() {
       creatives: [], createdAt: serverTimestamp(),
     });
     notifyAdmin(`${state.business.name} created a room: "${goal}"`, "New room", `${location_origin()}/#/admin`);
-    toast("Room created!");
-    go(`#/room/${ref.id}`);
+    showModal(`
+      <div style="text-align:center;">
+        <div style="font-size:42px;color:var(--success,#2e8b57);"><i class="fa-solid fa-circle-check"></i></div>
+        <h3 style="margin:8px 0;">Success!</h3>
+        <p>Your ad room is live. adRoomie is now finding you a match — we'll notify you the moment we do.</p>
+        <button class="btn btn-primary" id="roomCreatedOk" style="width:100%;margin-top:12px;">Got it</button>
+      </div>`);
+    document.getElementById("roomCreatedOk").onclick = () => { closeModal(); go(`#/room/${ref.id}`); };
   };
 }
 
@@ -968,6 +981,7 @@ async function renderRoomDetails(roomId) {
     <div class="detail-block"><h4><i class="fa-solid fa-magnifying-glass"></i> Looking For</h4><p>${esc((room.partnerType || []).join(", ") || "Any compatible business")}</p></div>
     ${!isOwner ? `<div class="detail-block"><h4><i class="fa-solid fa-bullseye"></i> Why this match (${score}% — a guide, not a guarantee)</h4><p>${match.reasons.length ? match.reasons.map(esc).join("<br>") : "No strong overlap with your profile."}${match.partnerSpecified && !match.partnerMatch ? "<br>Your category isn't one this room asked for." : ""}</p></div>` : ""}
     <div class="detail-block"><h4><i class="fa-solid fa-location-dot"></i> Location</h4><p>${esc(room.location)}</p></div>
+    ${!isOwner ? `<div class="detail-block" id="aboutCreator" style="display:none;"><h4><i class="fa-solid fa-store"></i> About the business</h4><p></p></div>` : ""}
     ${isOwner ? `
       <button class="btn btn-outline" id="inviteBtn" style="width:100%;margin-bottom:16px;"><i class="fa-solid fa-share-nodes"></i> Invite a Business to This Room</button>
       <h2 class="section-title">Join Requests</h2><div id="reqList">${loadingHTML("Loading…")}</div>
@@ -977,7 +991,13 @@ async function renderRoomDetails(roomId) {
     wireIncomingRequests(roomId);
     document.getElementById("inviteBtn").onclick = () => shareRoomInvite(roomId, room.goal);
   }
-  else document.getElementById("joinBtn").onclick = () => go(`#/room/${roomId}/join`);
+  else {
+    document.getElementById("joinBtn").onclick = () => go(`#/room/${roomId}/join`);
+    loadBusiness(room.createdBy).then((cb) => {
+      const el = document.getElementById("aboutCreator");
+      if (el && cb?.description) { el.querySelector("p").textContent = `${cb.name ? cb.name + " — " : ""}${cb.description}`; el.style.display = ""; }
+    });
+  }
 }
 
 function wireIncomingRequests(roomId) {
@@ -996,6 +1016,8 @@ function wireIncomingRequests(roomId) {
           ${avatarHTML(r.business, "sm")}
           <div class="info"><div class="name">${esc(r.business.name)}</div><div class="sub">${esc(r.business.category || "")}</div></div>
         </div>
+        <p class="meta-line" style="font-weight:600;color:var(--accent);"><i class="fa-solid fa-bullseye"></i> We found you a potential match for your ad room</p>
+        ${r.business.description ? `<p class="meta-line">${esc(r.business.description)}</p>` : ""}
         ${r.message ? `<p class="meta-line">"${esc(r.message)}"</p>` : ""}
         <div style="display:flex;gap:8px;margin-top:10px;">
           <button class="btn btn-primary btn-sm" data-a="accept" data-id="${r.id}"><i class="fa-solid fa-check"></i> Accept</button>
@@ -1030,7 +1052,7 @@ function renderJoinRequest(roomId) {
     });
     const roomSnap = await getDoc(doc(db, "rooms", roomId));
     const owner = await loadBusiness(roomSnap.data().createdBy);
-    notifyPartner(owner?.oneSignalPlayerId, `${state.business.name} requested to join your room`, "New join request", `${location.origin}/#/room/${roomId}`);
+    notifyPartner(owner?.oneSignalPlayerId, `${state.business.name} wants to partner with you on "${roomSnap.data().goal}". Tap to review.`, "We found you a potential match for your ad room", `${location.origin}/#/room/${roomId}`);
     notifyAdmin(`${state.business.name} requested to join "${roomSnap.data().goal}"`, "New join request", `${location_origin()}/#/admin`);
     toast("Request sent! Track it in your Inbox.");
     go("#/inbox");
@@ -1766,7 +1788,7 @@ async function renderAdmin() {
   function activityItems() {
     const bz = bizById(), rm = roomById();
     const items = [];
-    data.businesses.forEach((b) => items.push({ ms: bizCreatedMs(b), icon: "fa-store", title: "New business profile", text: `${b.name || "Unnamed"} · ${b.category || "—"} · ${b.location || "—"}`, tab: "businesses" }));
+    data.businesses.forEach((b) => items.push({ ms: bizCreatedMs(b), icon: "fa-store", title: "New business profile", text: `${b.name || "Unnamed"} · ${b.category || "—"} · ${b.location || "—"}${b.description ? ` — ${b.description}` : ""}`, tab: "businesses" }));
     data.rooms.forEach((r) => items.push({ ms: tsMillis(r.createdAt), icon: "fa-people-roof", title: "Room created", text: `"${r.goal}" by ${bz[r.createdBy]?.name || "Someone"} — now ${r.status}`, room: r.id }));
     data.requests.forEach((q) => items.push({ ms: tsMillis(q.createdAt), icon: "fa-paper-plane", title: `Join request (${q.status})`, text: `${bz[q.requesterId]?.name || "Someone"} → "${rm[q.roomId]?.goal || "room"}"`, room: q.roomId }));
     data.support.forEach((s) => items.push({ ms: tsMillis(s.createdAt), icon: "fa-life-ring", title: `Support: ${s.type}`, text: `${bz[s.requestedBy]?.name || "Someone"} · "${rm[s.roomId]?.goal || "room"}"${s.note ? ` — ${s.note}` : ""}`, room: s.roomId, chat: true }));
@@ -1812,6 +1834,7 @@ async function renderAdmin() {
         <div class="card" data-biz="${b.id}">
           <div class="row-top"><h3>${esc(b.name || "Unnamed")}</h3><span class="meta-line"><span class="${p.dot}"></span> ${esc(p.text)}</span></div>
           <div class="meta-line">${esc(b.category || "—")} · ${esc(b.location || "—")} · ${esc(b.budgetRange || "—")}</div>
+          <div class="meta-line">${b.description ? `“${esc(b.description)}”` : "<em>No description</em>"}</div>
           <div class="meta-line">Joined ${esc(fmtDateTime(b._created))} · ${b.emailVerified ? "email verified" : "email NOT verified"}</div>
           <div class="meta-line">${b._rooms} room${b._rooms === 1 ? "" : "s"} created · ${b._joined} joined · ${b._sent} request${b._sent === 1 ? "" : "s"} sent</div>
           <div class="meta-line">${esc((b.audience || []).join(", "))} · ${esc((b.platforms || []).join(", "))}</div>
@@ -1851,6 +1874,8 @@ async function renderAdmin() {
         <div class="card" data-roomcard="${r.id}">
           <div class="row-top"><h3>${esc(r.goal)}</h3><span class="status-pill status-${r.status}">${esc(r.status)}</span></div>
           <div class="meta-line">By <strong>${esc(bz[r.createdBy]?.name || "Unknown")}</strong> · partner: ${r.partnerId ? `<strong>${esc(bz[r.partnerId]?.name || "Unknown")}</strong>` : "none yet"}</div>
+          ${bz[r.createdBy]?.description ? `<div class="meta-line">About them: ${esc(bz[r.createdBy].description)}</div>` : ""}
+          <div class="meta-line">Audience: ${esc((r.audience || []).join(", ") || "—")} · ${esc(r.duration || "")} · ${esc((r.platforms || []).join(", "))}</div>
           <div class="meta-line">Looking for: ${esc((r.partnerType || []).join(", ") || "any")} · ${esc(r.location || "")} · ${esc(r.budgetRange || "")}</div>
           <div class="meta-line">Created ${esc(fmtDateTime(r._created))} · ${r._reqs} request${r._reqs === 1 ? "" : "s"} (${r._pending} pending)</div>
           <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;align-items:center;">
