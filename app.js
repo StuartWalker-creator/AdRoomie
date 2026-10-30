@@ -41,10 +41,10 @@ const ADMIN_UID = "SLIWNQz3e3hGPKMzGhfrTgMUFve2";
 
 const domain = window.location.origin;
 
-const CATEGORY_OPTIONS = ["Restaurant / Cafe","Bakery","Fitness / Health","Retail","Electronics/Gadgets","Homeware","Education","Beauty & Wellness","Services","Other"];
+const CATEGORY_OPTIONS = ["Cakes & Confectionery","Caterers","Planners & Decorators","Photographers & Videographers","Venues & Party Services","Restaurant / Cafe","Beauty & Wellness","Retail","Fitness / Health","Education","Services","Other"];
 const BUDGET_OPTIONS = ["UGX 100,000 - 300,000","UGX 300,000 - 500,000","UGX 500,000 - 800,000","UGX 800,000+"];
 const DURATION_OPTIONS = ["1 week","2 weeks","1 month"];
-const AUDIENCE_OPTIONS = ["Students","Young Adults (18-30)","Families","Professionals","Parents","Teens","Seniors","Tourists","Budget Shoppers","Luxury Shoppers","Fitness Enthusiasts","Foodies"];
+const AUDIENCE_OPTIONS = ["Engaged Couples / Weddings","Birthday & Party Hosts","Corporate Event Organisers","Parents (kids' parties)","Families","Young Adults (18-30)","Professionals","Students","Budget Shoppers","Luxury Shoppers","Foodies"];
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
@@ -346,6 +346,26 @@ function matchDetails(business, room) {
 }
 function matchScore(business, room) { return matchDetails(business, room).score; }
 
+// Business-to-business recommendation (for people who haven't made a room yet).
+// Same 40/25/15/10/10 weights; partner fit is two-way: 15 if the other business
+// is a type I said I want, +10 if I'm a type they said they want.
+function businessMatch(me, other) {
+  let score = 0; const reasons = [];
+  const mine = new Set(me.audience || []), theirs = new Set(other.audience || []);
+  const overlap = [...mine].filter((a) => theirs.has(a)).length;
+  const ratio = mine.size && theirs.size ? overlap / Math.min(mine.size, theirs.size) : 0;
+  score += ratio * 40;
+  if (overlap) reasons.push("Shared target audience");
+  const iWant = (me.partnerTypes || []).includes(other.category);
+  const theyWant = (other.partnerTypes || []).includes(me.category);
+  if (iWant) { score += 15; reasons.push("A type of partner you're looking for"); }
+  if (theyWant) { score += 10; reasons.push("Looking for a business like yours"); }
+  if (me.location && other.location && me.location.toLowerCase() === other.location.toLowerCase()) { score += 15; reasons.push("Same location"); }
+  if (me.budgetRange === other.budgetRange) { score += 10; reasons.push("Same budget range"); } else score += 4;
+  if ((me.platforms || []).some((p) => (other.platforms || []).includes(p))) { score += 10; reasons.push("Uses a shared ad platform"); }
+  return { score: Math.max(0, Math.min(100, Math.round(score))), reasons, iWant, theyWant };
+}
+
 // ============================================================
 // Auth
 // ============================================================
@@ -580,6 +600,7 @@ function renderProfile() {
   const b = state.business || {};
   const selectedPlatforms = new Set(b.platforms || []);
   const selectedAudience = new Set(b.audience || []);
+  const selectedPartnerTypes = new Set(b.partnerTypes || []);
   let photoURL = b.photoURL || null;
 
   appEl.innerHTML = `
@@ -607,6 +628,8 @@ function renderProfile() {
       <p class="hint">Used for the "Message on WhatsApp" link the AI caption tool adds — toggle off if this number can only take calls/SMS, not WhatsApp.</p>
     </div>
     <div class="field"><label>Target Audience</label>${renderChipGroup("audienceChips", AUDIENCE_OPTIONS, selectedAudience)}</div>
+    <div class="field"><label>Types of businesses you'd like to partner with</label>${renderChipGroup("partnerTypeChips", CATEGORY_OPTIONS, selectedPartnerTypes)}
+      <p class="hint">We use this to recommend businesses and rooms that fit you.</p></div>
     <div class="field"><label>Monthly Ad Budget Range</label>
       <select id="budget"><option value="">Select a range</option>
         ${BUDGET_OPTIONS.map((r) => `<option ${b.budgetRange === r ? "selected" : ""}>${r}</option>`).join("")}
@@ -629,6 +652,7 @@ function renderProfile() {
   document.querySelectorAll(".platform-chip").forEach((chip) => {
     chip.onclick = () => { const p = chip.dataset.p; selectedPlatforms.has(p) ? selectedPlatforms.delete(p) : selectedPlatforms.add(p); chip.classList.toggle("selected"); };
   });
+  wireChipGroup("partnerTypeChips", selectedPartnerTypes);
   wireChipGroup("audienceChips", selectedAudience);
 
   document.getElementById("avatarCircle").onclick = () => document.getElementById("avatarInput").click();
@@ -657,8 +681,8 @@ function renderProfile() {
     const location = document.getElementById("location").value.trim();
     const description = document.getElementById("description").value.trim();
     const budgetRange = document.getElementById("budget").value;
-    if (!name || !category || !description || !location || !budgetRange || selectedPlatforms.size === 0 || selectedAudience.size === 0) {
-      errorText.textContent = "Please fill in every field, and pick at least one audience and platform.";
+    if (!name || !category || !description || !location || !budgetRange || selectedPlatforms.size === 0 || selectedAudience.size === 0 || selectedPartnerTypes.size === 0) {
+      errorText.textContent = "Please fill in every field, and pick at least one audience, partner type and platform.";
       errorText.classList.add("show");
       return;
     }
@@ -666,7 +690,7 @@ function renderProfile() {
     await setDoc(doc(db, "businesses", state.user.uid), {
       ...(isNewProfile ? { createdAt: serverTimestamp() } : {}),
       uid: state.user.uid, name, category, description, location,
-      audience: Array.from(selectedAudience), budgetRange,
+      audience: Array.from(selectedAudience), partnerTypes: Array.from(selectedPartnerTypes), budgetRange,
       platforms: Array.from(selectedPlatforms), email: state.user.email,
       emailVerified: state.user.emailVerified,
       phone: document.getElementById("phoneInput").value.trim() || null,
@@ -731,20 +755,36 @@ function renderExplore() {
   appEl.innerHTML = `
     <h1 class="page-title">Explore Rooms</h1>
     <div class="search-bar"><i class="fa-solid fa-magnifying-glass"></i><input id="searchBox" placeholder="Search rooms or keywords"></div>
-    <div class="filter-tabs">
+    <div class="filter-tabs" id="viewTabs">
+      <button class="filter-tab active" data-v="rooms">Rooms</button>
+      <button class="filter-tab" data-v="businesses">Businesses</button>
+    </div>
+    <div class="filter-tabs" id="roomFilters">
       <button class="filter-tab active" data-f="all">All</button>
       <button class="filter-tab" data-f="recommended">Recommended</button>
       <button class="filter-tab" data-f="nearby">Nearby</button>
     </div>
     <div id="roomList">${loadingHTML("Loading rooms…")}</div>
   `;
-  let filter = "all", searchTerm = "";
-  document.querySelectorAll(".filter-tab").forEach((t) => {
+  let filter = "all", searchTerm = "", view = "rooms", allBiz = [];
+  document.querySelectorAll("#roomFilters .filter-tab").forEach((t) => {
     t.onclick = () => {
-      document.querySelectorAll(".filter-tab").forEach((x) => x.classList.remove("active"));
+      document.querySelectorAll("#roomFilters .filter-tab").forEach((x) => x.classList.remove("active"));
       t.classList.add("active"); filter = t.dataset.f; draw();
     };
   });
+  document.querySelectorAll("#viewTabs .filter-tab").forEach((t) => {
+    t.onclick = () => {
+      document.querySelectorAll("#viewTabs .filter-tab").forEach((x) => x.classList.remove("active"));
+      t.classList.add("active"); view = t.dataset.v;
+      document.getElementById("roomFilters").style.display = view === "rooms" ? "" : "none";
+      draw();
+    };
+  });
+  state.unsub.push(onSnapshot(collection(db, "businesses"), (snap) => {
+    allBiz = snap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((x) => x.name && x.id !== state.user.uid && x.id !== ADMIN_UID);
+    if (view === "businesses") draw();
+  }));
   document.getElementById("searchBox").oninput = (e) => { searchTerm = e.target.value.toLowerCase(); draw(); };
 
   const q = query(collection(db, "rooms"), where("status", "==", "open"));
@@ -759,7 +799,25 @@ function renderExplore() {
   });
   state.unsub.push(unsub);
 
+  function drawBusinesses() {
+    const list = document.getElementById("roomList");
+    let items = allBiz.map((x) => ({ ...x, _m: businessMatch(state.business, x) }));
+    if (searchTerm) items = items.filter((x) => `${x.name} ${x.category} ${x.description || ""} ${x.location || ""}`.toLowerCase().includes(searchTerm));
+    items.sort((a, b) => b._m.score - a._m.score);
+    if (!items.length) { list.innerHTML = `<div class="empty-state"><i class="fa-solid fa-store big-icon"></i>No other businesses yet.<br>New businesses appear here as they join.</div>`; return; }
+    list.innerHTML = `<p class="hint">Recommended for you, best fit first. To partner with one, create a room and choose their type of business — they'll be able to find and join it.</p>` + items.map((x) => `
+      <div class="card room-card">
+        <div class="thumb">${x.photoURL ? `<img src="${x.photoURL}">` : `<i class="fa-solid fa-store"></i>`}</div>
+        <div class="info">
+          <div class="row-top"><h3>${esc(x.name)}</h3><span class="match-badge"><i class="fa-solid fa-bullseye"></i>${x._m.score}%</span></div>
+          <div class="meta-line"><i class="fa-solid fa-tag"></i>${esc(x.category || "")} · <i class="fa-solid fa-location-dot"></i>${esc(x.location || "")}</div>
+          ${x.description ? `<div class="meta-line">${esc(x.description)}</div>` : ""}
+          ${x._m.reasons.length ? `<div class="meta-line"><i class="fa-solid fa-circle-check"></i>${esc(x._m.reasons.slice(0, 2).join(" · "))}</div>` : ""}
+        </div>
+      </div>`).join("");
+  }
   function draw() {
+    if (view === "businesses") { drawBusinesses(); return; }
     let rooms = allRooms.map((r) => { const m = matchDetails(state.business, r); return { ...r, _score: m.score, _reasons: m.reasons, _partnerOk: !m.partnerSpecified || m.partnerMatch }; });
     // Recommended: if the room asked for specific partner types, you must be one of them.
     if (filter === "recommended") rooms = rooms.filter((r) => r._partnerOk && r._score >= 50).sort((a, b) => b._score - a._score);
@@ -884,7 +942,7 @@ function renderCreateRoom() {
   renderBottomNav("create");
   const selectedPlatforms = new Set();
   const selectedAudience = new Set(state.business.audience || []);
-  const selectedPartnerTypes = new Set();
+  const selectedPartnerTypes = new Set(state.business.partnerTypes || []);
 
   appEl.innerHTML = `
     <h1 class="page-title">Post a Room</h1>
@@ -1112,6 +1170,24 @@ function renderChatTab(container, room) {
     </div>
     ${room.status === "negotiating" ? `<div id="agreeBtnWrap" style="margin-top:12px;"></div>` : ""}
   `;
+  // One-time welcome per user per room (dismissible). Falls back to showing
+  // each visit if browser storage is unavailable.
+  if (!state.isAdmin) {
+    const wKey = `adroomie_welcomed_${room.id}_${state.user.uid}`;
+    let seen = false;
+    try { seen = !!localStorage.getItem(wKey); } catch (e) {}
+    if (!seen) {
+      showModal(`
+        <div style="text-align:center;">
+          <div style="font-size:40px;color:var(--accent);"><i class="fa-solid fa-handshake"></i></div>
+          <h3 style="margin:8px 0;">Welcome to your ad room</h3>
+          <p>This is your shared space to talk with your partner about everything to do with your advertising collaboration — your goals, the offer, budget, creative and timing.</p>
+          <button class="btn btn-primary" id="welcomeOk" style="width:100%;margin-top:12px;">Got it</button>
+        </div>`);
+      try { localStorage.setItem(wKey, "1"); } catch (e) {} // mark seen as soon as it shows, even if dismissed by tapping outside
+      document.getElementById("welcomeOk").onclick = closeModal;
+    }
+  }
   const msgsQuery = query(collection(db, "rooms", room.id, "messages"), orderBy("createdAt", "asc"));
   const unsub = onSnapshot(msgsQuery, (snap) => {
     const scroll = document.getElementById("chatScroll");
