@@ -1294,7 +1294,7 @@ function openCaptionGenerator(room, partnerBiz, partnerId) {
       </div>
     `}
     <div class="field"><label>What's the offer?</label>
-      <textarea id="capOffer" rows="3" placeholder="e.g. 15% off coffee when you show a haircut receipt from Zziwa this week"></textarea>
+      <textarea id="capOffer" rows="3" placeholder="e.g. 15% off venue few when you show the partner's redeem code this week"></textarea>
     </div>
     <div class="field"><label>Website (optional)</label><input id="capWebsiteA" placeholder="${esc(state.business.name)}'s website"></div>
     <div class="field"><label>Partner's website (optional)</label><input id="capWebsiteB" placeholder="${esc(partnerBiz?.name || "Partner")}'s website"></div>
