@@ -246,13 +246,22 @@ async function uploadToCloudinary(file) {
 }
 
 async function notifyPartner(playerId, message, title, url) {
-  if (!playerId) return;
+  if (!playerId) return { ok: false, reason: "no push token for that business" };
   try {
-    await fetch("/api/send-notification", {
+    const res = await fetch("/api/send-notification", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ playerId, message, title, url }),
     });
-  } catch (e) { console.warn("Notification failed:", e); }
+    const data = await res.json().catch(() => null);
+    // OneSignal can answer HTTP 200 with an "errors" list (e.g. the device isn't
+    // subscribed) and no notification id — that is NOT a delivered push.
+    const osErrors = data?.errors ? JSON.stringify(data.errors) : null;
+    if (!res.ok || osErrors || (data && !data.id)) {
+      console.warn("Notification rejected:", res.status, data);
+      return { ok: false, reason: osErrors || data?.error || `HTTP ${res.status}` };
+    }
+    return { ok: true, data };
+  } catch (e) { console.warn("Notification failed:", e); return { ok: false, reason: "network error" }; }
 }
 
 // Pings you directly whenever a business requests support — you go through the
@@ -378,7 +387,9 @@ async function signIn(email, password) { return (await signInWithEmailAndPasswor
 function logOut() { return signOut(auth); }
 async function loadBusiness(uid) {
   const snap = await getDoc(doc(db, "businesses", uid));
-  return snap.exists() ? snap.data() : null;
+  // A doc with no name is just a presence/push stub created before the profile
+  // was saved — treat it as "no profile yet" so the user still gets the form.
+  return snap.exists() && snap.data().name ? snap.data() : null;
 }
 
 // ============================================================
@@ -696,13 +707,15 @@ function renderProfile() {
       phone: document.getElementById("phoneInput").value.trim() || null,
       phoneIsWhatsApp: document.getElementById("phoneIsWhatsApp").checked,
       photoURL: photoURL || null,
-      oneSignalPlayerId: b.oneSignalPlayerId || null,
+      oneSignalPlayerId: state.pushId || b.oneSignalPlayerId || null,
       rating: b.rating || null, reviewCount: b.reviewCount || 0,
       updatedAt: serverTimestamp(),
     }, { merge: true });
     state.business = await loadBusiness(state.user.uid);
     if (isNewProfile) notifyAdmin(`${name} (${category}, ${location}) just created a profile`, "New business profile", `${location_origin()}/#/admin`);
     toast("Profile saved!");
+    askPushPermission();
+    if (isNewProfile) autoMatchForNewProfile({ id: state.user.uid, ...state.business }).then((n) => { if (n) setTimeout(() => toast(`We found ${n} open room${n === 1 ? "" : "s"} that fit you — see Explore`), 2600); });
     go("#/rooms");
   };
 }
@@ -805,8 +818,8 @@ function renderExplore() {
     if (searchTerm) items = items.filter((x) => `${x.name} ${x.category} ${x.description || ""} ${x.location || ""}`.toLowerCase().includes(searchTerm));
     items.sort((a, b) => b._m.score - a._m.score);
     if (!items.length) { list.innerHTML = `<div class="empty-state"><i class="fa-solid fa-store big-icon"></i>No other businesses yet.<br>New businesses appear here as they join.</div>`; return; }
-    list.innerHTML = `<p class="hint">Recommended for you, best fit first. To partner with one, create a room and choose their type of business — they'll be able to find and join it.</p>` + items.map((x) => `
-      <div class="card room-card">
+    list.innerHTML = `<p class="hint">Recommended for you, best fit first. Tap a business to see their profile and invite them to one of your rooms.</p>` + items.map((x) => `
+      <div class="card room-card" data-biz="${x.id}">
         <div class="thumb">${x.photoURL ? `<img src="${x.photoURL}">` : `<i class="fa-solid fa-store"></i>`}</div>
         <div class="info">
           <div class="row-top"><h3>${esc(x.name)}</h3><span class="match-badge"><i class="fa-solid fa-bullseye"></i>${x._m.score}%</span></div>
@@ -815,6 +828,7 @@ function renderExplore() {
           ${x._m.reasons.length ? `<div class="meta-line"><i class="fa-solid fa-circle-check"></i>${esc(x._m.reasons.slice(0, 2).join(" · "))}</div>` : ""}
         </div>
       </div>`).join("");
+    list.querySelectorAll("[data-biz]").forEach((c) => { c.onclick = () => go(`#/business/${c.dataset.biz}`); });
   }
   function draw() {
     if (view === "businesses") { drawBusinesses(); return; }
@@ -852,6 +866,8 @@ async function renderInbox() {
   appEl.innerHTML = `
     <h1 class="page-title">Inbox</h1>
     <p class="page-sub">Requests to your rooms, and updates on rooms you've asked to join.</p>
+    <h2 class="section-title"><i class="fa-solid fa-envelope-open-text"></i> Invitations to join a room</h2>
+    <div id="invitesList">${loadingHTML("Loading…")}</div>
     <h2 class="section-title"><i class="fa-solid fa-inbox"></i> Requests to your rooms</h2>
     <div id="incomingList">${loadingHTML("Loading…")}</div>
     <h2 class="section-title"><i class="fa-solid fa-paper-plane"></i> Your sent requests</h2>
@@ -861,6 +877,8 @@ async function renderInbox() {
       A full in-app activity log is a natural next addition.
     </p>
   `;
+
+  wireInvitesInbox();
 
   // --- Incoming: all pending requests across rooms you created ---
   const qMyRooms = query(collection(db, "rooms"), where("createdBy", "==", state.user.uid));
@@ -1002,6 +1020,7 @@ function renderCreateRoom() {
       creatives: [], createdAt: serverTimestamp(),
     });
     notifyAdmin(`${state.business.name} created a room: "${goal}"`, "New room", `${location_origin()}/#/admin`);
+    getDoc(ref).then((snap) => { if (snap.exists()) autoMatchForNewRoom(ref.id, snap.data()); });
     showModal(`
       <div style="text-align:center;">
         <div style="font-size:42px;color:var(--success,#2e8b57);"><i class="fa-solid fa-circle-check"></i></div>
@@ -1047,7 +1066,7 @@ async function renderRoomDetails(roomId) {
   `;
   if (isOwner) {
     wireIncomingRequests(roomId);
-    document.getElementById("inviteBtn").onclick = () => shareRoomInvite(roomId, room.goal);
+    document.getElementById("inviteBtn").onclick = () => openInvitePanel(roomId, room);
   }
   else {
     document.getElementById("joinBtn").onclick = () => go(`#/room/${roomId}/join`);
@@ -1294,7 +1313,7 @@ function openCaptionGenerator(room, partnerBiz, partnerId) {
       </div>
     `}
     <div class="field"><label>What's the offer?</label>
-      <textarea id="capOffer" rows="3" placeholder="e.g. 15% off venue few when you show the partner's redeem code this week"></textarea>
+      <textarea id="capOffer" rows="3" placeholder="e.g. 15% off coffee when you show a haircut receipt from Zziwa this week"></textarea>
     </div>
     <div class="field"><label>Website (optional)</label><input id="capWebsiteA" placeholder="${esc(state.business.name)}'s website"></div>
     <div class="field"><label>Partner's website (optional)</label><input id="capWebsiteB" placeholder="${esc(partnerBiz?.name || "Partner")}'s website"></div>
@@ -1806,6 +1825,7 @@ async function renderAdmin() {
     <h1 class="page-title">Admin Dashboard</h1>
     <p class="page-sub">Live view of everything happening on adRoomie. Updates on its own — no refresh needed.</p>
     <div id="adminStats">${loadingHTML("Loading…")}</div>
+    <button class="btn btn-outline" id="testPushBtn" style="width:100%;margin-bottom:12px;"><i class="fa-solid fa-bell"></i> Send a test push to my device</button>
     <div class="filter-tabs" id="adminTabs">
       <button class="filter-tab active" data-t="activity">Activity</button>
       <button class="filter-tab" data-t="businesses">Businesses</button>
@@ -1816,8 +1836,14 @@ async function renderAdmin() {
     <div id="adminBody">${loadingHTML("Loading…")}</div>
   `;
 
-  const data = { businesses: [], rooms: [], requests: [], support: [], supportError: null };
+  const data = { businesses: [], rooms: [], requests: [], support: [], invites: [], supportError: null };
   const ui = { tab: "activity", roomSort: "newest", roomStage: "all", bizSort: "newest", bizSearch: "" };
+  document.getElementById("testPushBtn").onclick = async () => {
+    const me = await loadBusiness(state.user.uid);
+    if (!me?.oneSignalPlayerId) { toast("Your account has no push token yet — allow notifications, then save your profile."); return; }
+    const r = await notifyPartner(me.oneSignalPlayerId, "Test push from the admin dashboard — if you see this, notifications work.", "adRoomie test", `${location.origin}/#/admin`);
+    toast(r.ok ? "Test push sent — check your device" : `Push failed: ${r.reason}`);
+  };
   let lastSeen = 0;
   try { lastSeen = Number(localStorage.getItem(ADMIN_SEEN_KEY)) || 0; } catch (e) {}
 
@@ -1836,6 +1862,7 @@ async function renderAdmin() {
   listen(collection(db, "businesses"), (s) => { data.businesses = s.docs.map((d) => ({ id: d.id, ...d.data() })).filter((b) => b.name); }); // skip name-less presence stubs
   listen(collection(db, "rooms"), (s) => { data.rooms = s.docs.map((d) => ({ id: d.id, ...d.data() })); });
   listen(collectionGroup(db, "requests"), (s) => { data.requests = s.docs.map((d) => ({ id: d.id, roomId: d.ref.parent.parent.id, ...d.data() })); });
+  listen(collection(db, "invites"), (s) => { data.invites = s.docs.map((d) => ({ id: d.id, ...d.data() })); });
   listen(collectionGroup(db, "supportRequests"), (s) => {
     data.support = s.docs.map((d) => ({ id: d.id, roomId: d.ref.parent.parent.id, ...d.data() }));
     data.supportError = null;
@@ -1847,13 +1874,14 @@ async function renderAdmin() {
     const launched = counts.running + counts.completed;
     const pending = data.requests.filter((r) => r.status === "pending").length;
     const activeNow = data.businesses.filter((b) => presenceLabel(b.lastActiveAt).dot === "active-dot").length;
+    const pushOn = data.businesses.filter((b) => b.oneSignalPlayerId).length;
     const newSince = [...data.businesses.map(bizCreatedMs), ...data.rooms.map((r) => tsMillis(r.createdAt))].filter((ms) => ms > lastSeen).length;
     return `
       <div class="card">
         <div class="checklist-item"><span class="check"><i class="fa-solid fa-trophy"></i></span>
           <span><strong>${launched}</strong> room${launched === 1 ? "" : "s"} reached a launched campaign — your North Star number</span></div>
         <div class="meta-line" style="margin-top:6px;">
-          ${data.businesses.length} businesses (${activeNow} active now) · ${data.rooms.length} rooms · ${pending} pending request${pending === 1 ? "" : "s"}
+          ${data.businesses.length} businesses (${activeNow} active now, ${pushOn} with push on) · ${data.rooms.length} rooms · ${pending} pending request${pending === 1 ? "" : "s"}
         </div>
         <div class="meta-line">Open ${counts.open} · Negotiating ${counts.negotiating} · Confirmed ${counts.confirmed} · Running ${counts.running} · Completed ${counts.completed}</div>
         ${newSince ? `<div class="meta-line"><strong>${newSince}</strong> new profile/room event${newSince === 1 ? "" : "s"} since you last looked <button class="btn btn-outline" id="markSeenBtn" style="padding:2px 10px;margin-left:6px;">Mark seen</button></div>` : ""}
@@ -1867,6 +1895,7 @@ async function renderAdmin() {
     data.businesses.forEach((b) => items.push({ ms: bizCreatedMs(b), icon: "fa-store", title: "New business profile", text: `${b.name || "Unnamed"} · ${b.category || "—"} · ${b.location || "—"}${b.description ? ` — ${b.description}` : ""}`, tab: "businesses" }));
     data.rooms.forEach((r) => items.push({ ms: tsMillis(r.createdAt), icon: "fa-people-roof", title: "Room created", text: `"${r.goal}" by ${bz[r.createdBy]?.name || "Someone"} — now ${r.status}`, room: r.id }));
     data.requests.forEach((q) => items.push({ ms: tsMillis(q.createdAt), icon: "fa-paper-plane", title: `Join request (${q.status})`, text: `${bz[q.requesterId]?.name || "Someone"} → "${rm[q.roomId]?.goal || "room"}"`, room: q.roomId }));
+    data.invites.forEach((i) => items.push({ ms: tsMillis(i.createdAt), icon: "fa-envelope-open-text", title: `Invitation (${i.status})`, text: `${i.inviterName || "Someone"} → ${bz[i.inviteeId]?.name || "a business"} for "${i.roomGoal || "room"}"`, room: i.roomId }));
     data.support.forEach((s) => items.push({ ms: tsMillis(s.createdAt), icon: "fa-life-ring", title: `Support: ${s.type}`, text: `${bz[s.requestedBy]?.name || "Someone"} · "${rm[s.roomId]?.goal || "room"}"${s.note ? ` — ${s.note}` : ""}`, room: s.roomId, chat: true }));
     return items.filter((i) => i.ms).sort((a, b) => b.ms - a.ms).slice(0, 60);
   }
@@ -1911,7 +1940,7 @@ async function renderAdmin() {
           <div class="row-top"><h3>${esc(b.name || "Unnamed")}</h3><span class="meta-line"><span class="${p.dot}"></span> ${esc(p.text)}</span></div>
           <div class="meta-line">${esc(b.category || "—")} · ${esc(b.location || "—")} · ${esc(b.budgetRange || "—")}</div>
           <div class="meta-line">${b.description ? `“${esc(b.description)}”` : "<em>No description</em>"}</div>
-          <div class="meta-line">Joined ${esc(fmtDateTime(b._created))} · ${b.emailVerified ? "email verified" : "email NOT verified"}</div>
+          <div class="meta-line">Joined ${esc(fmtDateTime(b._created))} · ${b.emailVerified ? "email verified" : "email NOT verified"} · push ${b.oneSignalPlayerId ? "on" : "OFF"}</div>
           <div class="meta-line">${b._rooms} room${b._rooms === 1 ? "" : "s"} created · ${b._joined} joined · ${b._sent} request${b._sent === 1 ? "" : "s"} sent</div>
           <div class="meta-line">${esc((b.audience || []).join(", "))} · ${esc((b.platforms || []).join(", "))}</div>
           <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">
@@ -1979,6 +2008,19 @@ async function renderAdmin() {
       </div>`).join("");
   }
 
+  function invitesHTML() {
+    const bz = bizById();
+    if (!data.invites.length) return `<h2 class="section-title">Invitations</h2><p class="hint">No invitations yet.</p>`;
+    const list = [...data.invites].sort((a, b) => tsMillis(b.createdAt) - tsMillis(a.createdAt));
+    return `<h2 class="section-title">Invitations</h2>` + list.map((i) => `
+      <div class="card room-card" data-room="${i.roomId}">
+        <div class="info">
+          <div class="row-top"><h3>${esc(i.inviterName || "Someone")} → ${esc(bz[i.inviteeId]?.name || "a business")}</h3><span class="status-pill status-${i.status === "pending" ? "pending" : i.status}">${esc(i.status)}</span></div>
+          <div class="meta-line">"${esc(i.roomGoal || "room")}" · ${esc(fmtDateTime(tsMillis(i.createdAt)))}</div>
+        </div>
+      </div>`).join("");
+  }
+
   // ---- Support ----
   function supportHTML() {
     if (data.supportError) {
@@ -2010,7 +2052,7 @@ async function renderAdmin() {
     statsEl.innerHTML = statsHTML();
     const seenBtn = document.getElementById("markSeenBtn");
     if (seenBtn) seenBtn.onclick = () => { lastSeen = Date.now(); try { localStorage.setItem(ADMIN_SEEN_KEY, String(lastSeen)); } catch (e) {} draw(); };
-    body.innerHTML = { activity: activityHTML, businesses: businessesHTML, rooms: roomsHTML, requests: requestsHTML, support: supportHTML }[ui.tab]();
+    body.innerHTML = { activity: activityHTML, businesses: businessesHTML, rooms: roomsHTML, requests: () => requestsHTML() + invitesHTML(), support: supportHTML }[ui.tab]();
 
     body.querySelectorAll("[data-room]").forEach((c) => { c.onclick = () => go(`#/room/${c.dataset.room}${c.dataset.chat === "1" ? "/chat" : ""}`); });
     body.querySelectorAll("[data-tab]").forEach((c) => { c.onclick = () => { if (!c.dataset.tab) return; ui.tab = c.dataset.tab; document.querySelectorAll("#adminTabs .filter-tab").forEach((x) => x.classList.toggle("active", x.dataset.t === ui.tab)); draw(); }; });
@@ -2055,6 +2097,247 @@ async function renderAdmin() {
 }
 
 // ============================================================
+// Auto-match notifications + invitations
+// No Cloud Functions: these run in the browser of whoever just created the
+// profile/room, right after creation. They're capped so nobody gets spammed.
+// ============================================================
+const AUTO_MATCH_MIN = 60;   // minimum match score to trigger a "possible match" push
+const AUTO_MATCH_MAX = 4;    // max pushes sent per new profile/room
+const MATCH_TITLE = "We got a possible match for you to collaborate with";
+
+async function autoMatchForNewRoom(roomId, room) {
+  try {
+    if (!(room.partnerType || []).length || !state.business?.name) return 0;
+    const snap = await getDocs(collection(db, "businesses"));
+    const cands = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
+      .filter((b) => b.name && b.id !== room.createdBy && b.id !== ADMIN_UID);
+    const hits = cands.map((b) => ({ b, m: matchDetails(b, room) }))
+      .filter((x) => x.m.partnerMatch && x.m.score >= AUTO_MATCH_MIN)
+      .sort((a, b) => b.m.score - a.m.score).slice(0, AUTO_MATCH_MAX);
+    hits.forEach(({ b }) => notifyPartner(b.oneSignalPlayerId,
+      `"${room.goal}" by ${state.business.name} looks like a good fit for ${b.name}. Tap to view the room.`,
+      MATCH_TITLE, `${location.origin}/#/room/${roomId}`));
+    if (hits.length) notifyAdmin(`New room "${room.goal}" was auto-matched to ${hits.length} business${hits.length === 1 ? "" : "es"}`, "Auto-match", `${location.origin}/#/admin`);
+    return hits.length;
+  } catch (e) { console.warn("Auto-match (room) skipped:", e); return 0; }
+}
+
+async function autoMatchForNewProfile(me) {
+  try {
+    const [bSnap, rSnap] = await Promise.all([
+      getDocs(collection(db, "businesses")),
+      getDocs(query(collection(db, "rooms"), where("status", "==", "open"))),
+    ]);
+    const businesses = bSnap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((b) => b.name && b.id !== me.id && b.id !== ADMIN_UID);
+    const rooms = rSnap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((r) => r.createdBy !== me.id);
+    const hasOpenRoom = new Set(rooms.map((r) => r.createdBy));
+    let sent = 0;
+
+    // 1) Open rooms that asked for this kind of business -> tell the room owner.
+    const roomHits = rooms.map((r) => ({ r, m: matchDetails(me, r) }))
+      .filter((x) => x.m.partnerMatch && x.m.score >= AUTO_MATCH_MIN)
+      .sort((a, b) => b.m.score - a.m.score).slice(0, 3);
+    roomHits.forEach(({ r }) => {
+      const owner = businesses.find((b) => b.id === r.createdBy);
+      notifyPartner(owner?.oneSignalPlayerId,
+        `${me.name} (${me.category}) just joined and fits your room "${r.goal}". Tap to view them and send an invite.`,
+        MATCH_TITLE, `${location.origin}/#/business/${me.id}`);
+      sent++;
+    });
+
+    // 2) Businesses with no open room that want this kind of business -> next action: create a room and invite.
+    const bizHits = businesses.filter((z) => !hasOpenRoom.has(z.id))
+      .map((z) => ({ z, m: businessMatch(z, me) }))
+      .filter((x) => x.m.iWant && x.m.score >= AUTO_MATCH_MIN)
+      .sort((a, b) => b.m.score - a.m.score).slice(0, AUTO_MATCH_MAX);
+    bizHits.forEach(({ z }) => {
+      notifyPartner(z.oneSignalPlayerId,
+        `${me.name} (${me.category}) just joined adRoomie and could be a good partner for you. Next step: create a room and invite them to join it.`,
+        MATCH_TITLE, `${location.origin}/#/business/${me.id}`);
+      sent++;
+    });
+    if (sent) notifyAdmin(`New profile ${me.name} was auto-matched: ${roomHits.length} room owner(s), ${bizHits.length} business(es) notified`, "Auto-match", `${location.origin}/#/admin`);
+    return roomHits.length; // how many open rooms fit the new business (used for an in-app hint)
+  } catch (e) { console.warn("Auto-match (profile) skipped:", e); return 0; }
+}
+
+// ---- Invitations: room owner invites a business; that business accepts/declines ----
+const inviteId = (roomId, bizId) => `${roomId}_${bizId}`;
+
+async function sendInvite(roomId, room, biz) {
+  await setDoc(doc(db, "invites", inviteId(roomId, biz.id)), {
+    roomId, roomGoal: room.goal, inviterId: state.user.uid, inviterName: state.business.name,
+    inviteeId: biz.id, status: "pending", createdAt: serverTimestamp(),
+  });
+  notifyPartner(biz.oneSignalPlayerId, `${state.business.name} invited you to join their ad room "${room.goal}". Tap to respond.`,
+    "You've been invited to an ad room", `${location.origin}/#/inbox`);
+  notifyAdmin(`${state.business.name} invited ${biz.name} to "${room.goal}"`, "Invitation sent", `${location.origin}/#/admin`);
+}
+
+async function acceptInvite(inv) {
+  try {
+    const roomRef = doc(db, "rooms", inv.roomId);
+    const roomSnap = await getDoc(roomRef);
+    if (!roomSnap.exists() || roomSnap.data().partnerId || roomSnap.data().status !== "open") {
+      toast("Sorry — this room already has a partner or is closed."); return;
+    }
+    await updateDoc(doc(db, "invites", inviteId(inv.roomId, state.user.uid)), { status: "accepted", respondedAt: serverTimestamp() });
+    await updateDoc(roomRef, { partnerId: state.user.uid, status: "negotiating" });
+    const inviter = await loadBusiness(inv.inviterId);
+    notifyPartner(inviter?.oneSignalPlayerId, `${state.business.name} accepted your invitation — let's plan the campaign!`, "Invitation accepted", `${location.origin}/#/room/${inv.roomId}/chat`);
+    notifyAdmin(`${state.business.name} accepted an invitation to "${inv.roomGoal}"`, "Invitation accepted", `${location.origin}/#/admin`);
+    toast("You're in! The room is now negotiating.");
+    go(`#/room/${inv.roomId}/chat`);
+  } catch (e) {
+    console.warn("Accept invite failed:", e);
+    toast("Couldn't join — the room may have just been taken.");
+  }
+}
+async function declineInvite(inv) {
+  await updateDoc(doc(db, "invites", inviteId(inv.roomId, state.user.uid)), { status: "declined", respondedAt: serverTimestamp() });
+  const inviter = await loadBusiness(inv.inviterId);
+  notifyPartner(inviter?.oneSignalPlayerId, `${state.business.name} declined your invitation to "${inv.roomGoal}".`, "Invitation declined", `${location.origin}/#/rooms`);
+  toast("Invitation declined.");
+}
+
+// Inbox section: invitations I've received
+function wireInvitesInbox() {
+  const el = document.getElementById("invitesList");
+  if (!el) return;
+  const q = query(collection(db, "invites"), where("inviteeId", "==", state.user.uid));
+  state.unsub.push(onSnapshot(q, (snap) => {
+    const list = document.getElementById("invitesList");
+    if (!list) return;
+    const pending = snap.docs.map((d) => d.data()).filter((i) => i.status === "pending")
+      .sort((a, b) => tsMillis(b.createdAt) - tsMillis(a.createdAt));
+    if (!pending.length) { list.innerHTML = `<p class="hint">No invitations right now.</p>`; return; }
+    list.innerHTML = pending.map((i, n) => `
+      <div class="card">
+        <p class="meta-line" style="font-weight:600;color:var(--accent);"><i class="fa-solid fa-envelope-open-text"></i> ${esc(i.inviterName || "A business")} invited you to join their ad room</p>
+        <div class="name">${esc(i.roomGoal || "Ad room")}</div>
+        <div style="display:flex;gap:8px;margin-top:10px;">
+          <button class="btn btn-outline btn-sm" data-view="${esc(i.roomId)}"><i class="fa-solid fa-eye"></i> View room</button>
+          <button class="btn btn-primary btn-sm" data-n="${n}" data-a="accept"><i class="fa-solid fa-check"></i> Join</button>
+          <button class="btn btn-outline btn-sm" data-n="${n}" data-a="decline"><i class="fa-solid fa-xmark"></i> Decline</button>
+        </div>
+      </div>`).join("");
+    list.querySelectorAll("button[data-view]").forEach((b) => { b.onclick = () => go(`#/room/${b.dataset.view}`); });
+    list.querySelectorAll("button[data-a]").forEach((b) => {
+      b.onclick = () => { const inv = pending[Number(b.dataset.n)]; b.disabled = true; (b.dataset.a === "accept" ? acceptInvite(inv) : declineInvite(inv)); };
+    });
+  }, (e) => { console.warn("Invites listener failed:", e); const l = document.getElementById("invitesList"); if (l) l.innerHTML = `<p class="hint">Couldn't load invitations (${esc(e?.code || "error")}).</p>`; }));
+}
+
+// Invite panel on a room: search businesses on adRoomie, invite them, or share a link instead
+async function openInvitePanel(roomId, room) {
+  showModal(`
+    <h3 style="margin-bottom:8px;">Invite a business</h3>
+    <div class="search-bar"><i class="fa-solid fa-magnifying-glass"></i><input id="invSearch" placeholder="Search name, category, what they do"></div>
+    <div id="invList" style="max-height:52vh;overflow:auto;">${loadingHTML("Loading businesses…")}</div>
+    <button class="btn btn-outline" id="invShare" style="width:100%;margin-top:10px;"><i class="fa-solid fa-share-nodes"></i> Share a link instead</button>
+    <button class="btn btn-outline" id="invClose" style="width:100%;margin-top:8px;">Close</button>`);
+  document.getElementById("invClose").onclick = closeModal;
+  document.getElementById("invShare").onclick = () => shareRoomInvite(roomId, room.goal);
+  let businesses = [], invited = {}, term = "";
+  try {
+    const [bSnap, iSnap] = await Promise.all([
+      getDocs(collection(db, "businesses")),
+      getDocs(query(collection(db, "invites"), where("inviterId", "==", state.user.uid), where("roomId", "==", roomId))),
+    ]);
+    businesses = bSnap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((b) => b.name && b.id !== state.user.uid && b.id !== ADMIN_UID);
+    iSnap.docs.forEach((d) => { invited[d.data().inviteeId] = d.data().status; });
+  } catch (e) {
+    console.warn("Invite panel load failed:", e);
+    document.getElementById("invList").innerHTML = `<p class="hint">Couldn't load businesses (${esc(e?.code || "error")}).</p>`; return;
+  }
+  const draw = () => {
+    const listEl = document.getElementById("invList");
+    if (!listEl) return;
+    let items = businesses.map((b) => ({ ...b, _m: matchDetails(b, room) }));
+    if (term) items = items.filter((b) => `${b.name} ${b.category} ${b.description || ""} ${b.location || ""}`.toLowerCase().includes(term));
+    items.sort((a, b) => b._m.score - a._m.score);
+    if (!items.length) { listEl.innerHTML = `<p class="hint">No businesses found.</p>`; return; }
+    listEl.innerHTML = items.map((b) => {
+      const st = invited[b.id];
+      return `
+      <div class="card">
+        <div class="row-top"><h3>${esc(b.name)}</h3><span class="match-badge"><i class="fa-solid fa-bullseye"></i>${b._m.score}%</span></div>
+        <div class="meta-line">${esc(b.category || "")} · ${esc(b.location || "")}</div>
+        ${b.description ? `<div class="meta-line">${esc(b.description.length > 110 ? b.description.slice(0, 110) + "…" : b.description)}</div>` : ""}
+        ${b._m.reasons.length ? `<div class="meta-line"><i class="fa-solid fa-circle-check"></i>${esc(b._m.reasons.slice(0, 2).join(" · "))}</div>` : ""}
+        <div style="margin-top:8px;">${st
+          ? `<span class="status-pill status-${st === "pending" ? "pending" : st}">${st === "pending" ? "Invited — waiting" : esc(st)}</span>`
+          : `<button class="btn btn-primary btn-sm" data-inv="${b.id}"><i class="fa-solid fa-paper-plane"></i> Invite</button>`}</div>
+      </div>`;
+    }).join("");
+    listEl.querySelectorAll("button[data-inv]").forEach((btn) => {
+      btn.onclick = async () => {
+        const biz = businesses.find((x) => x.id === btn.dataset.inv);
+        btn.disabled = true;
+        try { await sendInvite(roomId, room, biz); invited[biz.id] = "pending"; toast(`Invitation sent to ${biz.name}`); draw(); }
+        catch (e) { console.warn("Invite failed:", e); toast("Couldn't send the invitation."); btn.disabled = false; }
+      };
+    });
+  };
+  document.getElementById("invSearch").oninput = (e) => { term = e.target.value.toLowerCase(); draw(); };
+  draw();
+}
+
+// Business page: what an auto-match push opens. Shows the business and the next action.
+async function renderBusinessPage(id) {
+  renderTopbar({ back: true });
+  renderBottomNav("explore");
+  appEl.innerHTML = loadingHTML("Loading business…");
+  const b = await loadBusiness(id);
+  if (!b) { appEl.innerHTML = `<div class="empty-state">Business not found.</div>`; return; }
+  const m = businessMatch(state.business, { ...b, id });
+  const p = presenceLabel(b.lastActiveAt);
+  let rooms = [], statuses = {};
+  if (id !== state.user.uid) {
+    try {
+      const rSnap = await getDocs(query(collection(db, "rooms"), where("createdBy", "==", state.user.uid), where("status", "==", "open")));
+      rooms = rSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      await Promise.all(rooms.map(async (r) => {
+        const s = await getDoc(doc(db, "invites", inviteId(r.id, id)));
+        if (s.exists()) statuses[r.id] = s.data().status;
+      }));
+    } catch (e) { console.warn("Business page rooms load failed:", e); }
+  }
+  appEl.innerHTML = `
+    <div style="text-align:center;margin-top:8px;">${avatarHTML(b, "")}</div>
+    <h1 class="page-title" style="text-align:center;">${esc(b.name)}</h1>
+    <p class="page-sub" style="text-align:center;">${esc(b.category || "")} · ${esc(b.location || "")} · <span class="${p.dot}"></span> ${esc(p.text)}</p>
+    ${b.description ? `<div class="detail-block"><h4><i class="fa-solid fa-store"></i> What they do</h4><p>${esc(b.description)}</p></div>` : ""}
+    <div class="detail-block"><h4><i class="fa-solid fa-users"></i> Their customers</h4><p>${esc((b.audience || []).join(", ") || "—")}</p></div>
+    <div class="detail-block"><h4><i class="fa-solid fa-magnifying-glass"></i> Looking to partner with</h4><p>${esc((b.partnerTypes || []).join(", ") || "—")}</p></div>
+    ${id !== state.user.uid ? `<div class="detail-block"><h4><i class="fa-solid fa-bullseye"></i> Why this match (${m.score}% — a guide, not a guarantee)</h4><p>${m.reasons.length ? m.reasons.map(esc).join("<br>") : "No strong overlap with your profile."}</p></div>` : ""}
+    <div id="bizActions"></div>`;
+  const act = document.getElementById("bizActions");
+  if (id === state.user.uid) return;
+  if (!rooms.length) {
+    act.innerHTML = `<p class="hint">Next step: create a room and invite this business to join it.</p>
+      <button class="btn btn-primary" id="mkRoom"><i class="fa-solid fa-plus"></i> Create a room</button>`;
+    document.getElementById("mkRoom").onclick = () => go("#/create-room");
+    return;
+  }
+  act.innerHTML = `<h2 class="section-title">Invite to one of your rooms</h2>` + rooms.map((r) => {
+    const st = statuses[r.id];
+    return `<div class="card"><div class="row-top"><h3>${esc(r.goal)}</h3></div>
+      <div style="margin-top:8px;">${st ? `<span class="status-pill status-${st === "pending" ? "pending" : st}">${st === "pending" ? "Invited — waiting" : esc(st)}</span>`
+        : `<button class="btn btn-primary btn-sm" data-room="${r.id}"><i class="fa-solid fa-paper-plane"></i> Invite</button>`}</div></div>`;
+  }).join("") + `<button class="btn btn-outline" id="mkRoom2" style="margin-top:8px;"><i class="fa-solid fa-plus"></i> Create another room</button>`;
+  document.getElementById("mkRoom2").onclick = () => go("#/create-room");
+  act.querySelectorAll("button[data-room]").forEach((btn) => {
+    btn.onclick = async () => {
+      const room = rooms.find((r) => r.id === btn.dataset.room);
+      btn.disabled = true;
+      try { await sendInvite(room.id, room, { id, ...b }); toast(`Invitation sent to ${b.name}`); renderBusinessPage(id); }
+      catch (e) { console.warn("Invite failed:", e); toast("Couldn't send the invitation."); btn.disabled = false; }
+    };
+  });
+}
+
+// ============================================================
 // Router
 // ============================================================
 async function router() {
@@ -2089,6 +2372,7 @@ async function router() {
   else if (route === "inbox") renderInbox();
   else if (route === "admin") renderAdmin();
   else if (route === "profile") renderProfile();
+  else if (route === "business" && id) renderBusinessPage(id);
   else if (route === "create-room") renderCreateRoom();
   else if (route === "room" && id && !sub) renderRoomDetails(id);
   else if (route === "room" && id && sub === "join") renderJoinRequest(id);
@@ -2126,7 +2410,7 @@ let presenceVisibilityHandler = null;
 function startPresenceHeartbeat() {
   stopPresenceHeartbeat(); // avoid double-registering on repeated auth events
   const beat = () => {
-    if (!state.user || document.visibilityState !== "visible") return;
+    if (!state.user || !state.business?.name || document.visibilityState !== "visible") return;
     setDoc(doc(db, "businesses", state.user.uid), { lastActiveAt: serverTimestamp() }, { merge: true }).catch(() => {});
   };
   beat();
@@ -2172,17 +2456,34 @@ async function initOneSignal() {
     window.OneSignalDeferred = window.OneSignalDeferred || [];
     OneSignalDeferred.push(async (OneSignal) => {
       await OneSignal.init({ appId: ONESIGNAL_APP_ID });
-      // init() alone does NOT show the permission prompt on the current SDK —
-      // it has to be requested explicitly, or Auto Prompt has to be enabled
-      // in the OneSignal dashboard (Settings > Push & In-App > Web).
-      const alreadyDecided = OneSignal.Notifications.permission !== "default";
-      if (!alreadyDecided) {
-        await OneSignal.Notifications.requestPermission();
-      }
-      const id = await OneSignal.User.PushSubscription.id;
-      if (id && state.business && state.business.oneSignalPlayerId !== id) {
-        await updateDoc(doc(db, "businesses", state.user.uid), { oneSignalPlayerId: id });
-      }
+      // Save the device's push id whenever it appears or changes. Before a
+      // profile exists we only remember it in memory (state.pushId); the
+      // profile save then writes it. Without this, a brand-new user's token
+      // was never stored until their next visit.
+      const save = async (id) => {
+        if (!id) return;
+        state.pushId = id;
+        if (state.business?.name && state.business.oneSignalPlayerId !== id) {
+          try { await updateDoc(doc(db, "businesses", state.user.uid), { oneSignalPlayerId: id }); state.business.oneSignalPlayerId = id; }
+          catch (e) { console.warn("Saving push id failed:", e); }
+        }
+      };
+      OneSignal.User.PushSubscription.addEventListener("change", (ev) => save(ev?.current?.id));
+      // In SDK v16, Notifications.permission is a boolean; the "default" /
+      // "granted" / "denied" string lives in permissionNative.
+      const native = OneSignal.Notifications.permissionNative;
+      if (native === "default") await OneSignal.Notifications.requestPermission();
+      await save(await OneSignal.User.PushSubscription.id);
     });
   } catch (e) { console.warn("OneSignal init skipped:", e); }
+}
+// Ask for notification permission from a user tap (browsers trust this more
+// than a prompt that appears on page load).
+function askPushPermission() {
+  try {
+    window.OneSignalDeferred = window.OneSignalDeferred || [];
+    OneSignalDeferred.push(async (OneSignal) => {
+      if (OneSignal.Notifications.permissionNative === "default") await OneSignal.Notifications.requestPermission();
+    });
+  } catch (e) {}
 }

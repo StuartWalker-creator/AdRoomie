@@ -22,7 +22,17 @@ service cloud.firestore {
       allow read: if request.auth != null;
       allow create: if request.auth != null && request.resource.data.createdBy == request.auth.uid;
       allow update: if request.auth != null &&
-        (resource.data.createdBy == request.auth.uid || resource.data.partnerId == request.auth.uid || isAdmin());
+        (resource.data.createdBy == request.auth.uid || resource.data.partnerId == request.auth.uid || isAdmin()
+         // An invited business may take the empty partner seat, but ONLY if the
+         // room is still open and they hold an ACCEPTED invitation for this room,
+         // and only by changing partnerId + status (nothing else).
+         || (resource.data.partnerId == null
+             && resource.data.status == 'open'
+             && request.resource.data.partnerId == request.auth.uid
+             && request.resource.data.status == 'negotiating'
+             && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['partnerId', 'status'])
+             && exists(/databases/$(database)/documents/invites/$(roomId + '_' + request.auth.uid))
+             && get(/databases/$(database)/documents/invites/$(roomId + '_' + request.auth.uid)).data.status == 'accepted'));
       allow delete: if false;
 
       match /requests/{requestId} {
@@ -88,6 +98,26 @@ service cloud.firestore {
     // specifically for the cross-room admin view, so it's admin-only.
     match /{path=**}/supportRequests/{reqId} {
       allow read: if isAdmin();
+    }
+
+    // Invitations: a room owner invites a business; the business accepts or declines.
+    // Doc id is "{roomId}_{inviteeId}" so there is at most one invite per business per room.
+    match /invites/{inviteDocId} {
+      allow read: if request.auth != null &&
+        (resource.data.inviteeId == request.auth.uid ||
+         resource.data.inviterId == request.auth.uid ||
+         isAdmin());
+      allow create: if request.auth != null
+        && request.resource.data.inviterId == request.auth.uid
+        && request.resource.data.status == 'pending'
+        && inviteDocId == request.resource.data.roomId + '_' + request.resource.data.inviteeId
+        && get(/databases/$(database)/documents/rooms/$(request.resource.data.roomId)).data.createdBy == request.auth.uid;
+      // The invited business may only change the status (and when they responded).
+      allow update: if request.auth != null
+        && resource.data.inviteeId == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'respondedAt'])
+        && request.resource.data.status in ['accepted', 'declined'];
+      allow delete: if false;
     }
 
     match /reviews/{reviewId} {
