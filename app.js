@@ -726,7 +726,8 @@ function renderProfile() {
 function renderMyRooms() {
   renderTopbar({});
   renderBottomNav("rooms");
-  appEl.innerHTML = `<h1 class="page-title">Your Rooms</h1><p class="page-sub">Rooms you're currently working on.</p><div id="list">${loadingHTML("Loading…")}</div>`;
+  appEl.innerHTML = `<h1 class="page-title">Your Rooms</h1><p class="page-sub">Rooms you're currently working on.</p><div id="pushBanner"></div><div id="list">${loadingHTML("Loading…")}</div>`;
+  renderPushBanner();
   const qCreated = query(collection(db, "rooms"), where("createdBy", "==", state.user.uid));
   const qJoined = query(collection(db, "rooms"), where("partnerId", "==", state.user.uid));
   let created = [], joined = [];
@@ -2451,11 +2452,21 @@ async function checkIsAdmin(uid) {
   } catch (e) { return false; } // not an admin, or rules blocked it — either way, treat as non-admin
 }
 
+let osReadyResolve;
+const osReady = new Promise((r) => { osReadyResolve = r; }); // resolves with the OneSignal object once init finishes
 async function initOneSignal() {
   try {
     window.OneSignalDeferred = window.OneSignalDeferred || [];
     OneSignalDeferred.push(async (OneSignal) => {
-      await OneSignal.init({ appId: ONESIGNAL_APP_ID });
+      try { await OneSignal.init({ appId: ONESIGNAL_APP_ID }); }
+      catch (e) {
+        // Typical causes: the site URL in OneSignal's dashboard doesn't match this
+        // address, or the service worker file isn't served from the site root.
+        state.pushError = String(e?.message || e);
+        console.warn("OneSignal init failed:", e);
+        osReadyResolve(null);
+        return;
+      }
       // Save the device's push id whenever it appears or changes. Before a
       // profile exists we only remember it in memory (state.pushId); the
       // profile save then writes it. Without this, a brand-new user's token
@@ -2469,6 +2480,7 @@ async function initOneSignal() {
         }
       };
       OneSignal.User.PushSubscription.addEventListener("change", (ev) => save(ev?.current?.id));
+      osReadyResolve(OneSignal);
       // In SDK v16, Notifications.permission is a boolean; the "default" /
       // "granted" / "denied" string lives in permissionNative.
       const native = OneSignal.Notifications.permissionNative;
@@ -2476,6 +2488,48 @@ async function initOneSignal() {
       await save(await OneSignal.User.PushSubscription.id);
     });
   } catch (e) { console.warn("OneSignal init skipped:", e); }
+}
+// Visible "Turn on notifications" card on the Rooms home. Shows only while
+// this device can't yet receive pushes, and says why (blocked / unsupported
+// browser / not yet asked). Enabling happens from a tap, which browsers trust.
+function renderPushBanner() {
+  Promise.race([osReady, new Promise((r) => setTimeout(() => r(undefined), 8000))]).then((OneSignal) => {
+    const box = document.getElementById("pushBanner");
+    if (!box) return;
+    if (!OneSignal) {
+      const why = OneSignal === null ? `OneSignal failed to start: ${state.pushError || "unknown error"}` : "The push service didn't load (blocked by the browser, an ad-blocker, or an in-app browser).";
+      box.innerHTML = `<div class="card" style="border:1px solid var(--accent);"><p class="meta-line" style="font-weight:600;"><i class="fa-solid fa-bell"></i> Notifications are off</p><p class="meta-line">${esc(why)}</p></div>`;
+      return;
+    }
+    let supported = true;
+    try { supported = OneSignal.Notifications.isPushSupported(); } catch (e) {}
+    const native = OneSignal.Notifications.permissionNative;
+    const optedIn = OneSignal.User.PushSubscription.optedIn;
+    if (supported && native === "granted" && optedIn && state.business?.oneSignalPlayerId) { box.innerHTML = ""; return; }
+    let text, btn = "";
+    if (!supported) text = "This browser can't receive notifications. Open adRoomie in Chrome (Android) or Safari after adding it to your home screen, not inside WhatsApp or Instagram.";
+    else if (native === "denied") text = "Notifications are blocked for adRoomie. Tap the lock icon next to the address bar, choose Permissions → Notifications → Allow, then reload.";
+    else { text = "Turn on notifications so you hear straight away when a business invites you, requests to join, or we find you a match."; btn = `<button class="btn btn-primary btn-sm" id="enablePushBtn" style="margin-top:8px;"><i class="fa-solid fa-bell"></i> Turn on notifications</button>`; }
+    const dbg = `supported=${supported} · permission=${native} · subscribed=${optedIn} · saved=${!!state.business?.oneSignalPlayerId}`;
+    box.innerHTML = `<div class="card" style="border:1px solid var(--accent);"><p class="meta-line" style="font-weight:600;"><i class="fa-solid fa-bell"></i> Notifications are off</p><p class="meta-line">${esc(text)}</p>${btn}<p class="meta-line" style="opacity:.6;font-size:11px;margin-top:6px;">${esc(dbg)}</p></div>`;
+    const b = document.getElementById("enablePushBtn");
+    if (b) b.onclick = async () => {
+      b.disabled = true;
+      try {
+        if (OneSignal.Notifications.permissionNative === "default") await OneSignal.Notifications.requestPermission();
+        if (OneSignal.Notifications.permissionNative === "granted") {
+          await OneSignal.User.PushSubscription.optIn();
+          const id = await OneSignal.User.PushSubscription.id;
+          if (id && state.business?.name) {
+            state.pushId = id;
+            await updateDoc(doc(db, "businesses", state.user.uid), { oneSignalPlayerId: id });
+            state.business.oneSignalPlayerId = id;
+          }
+        }
+      } catch (e) { console.warn("Enable push failed:", e); }
+      renderPushBanner();
+    };
+  });
 }
 // Ask for notification permission from a user tap (browsers trust this more
 // than a prompt that appears on page load).
