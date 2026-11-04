@@ -714,7 +714,6 @@ function renderProfile() {
     state.business = await loadBusiness(state.user.uid);
     if (isNewProfile) notifyAdmin(`${name} (${category}, ${location}) just created a profile`, "New business profile", `${location_origin()}/#/admin`);
     toast("Profile saved!");
-    askPushPermission();
     if (isNewProfile) autoMatchForNewProfile({ id: state.user.uid, ...state.business }).then((n) => { if (n) setTimeout(() => toast(`We found ${n} open room${n === 1 ? "" : "s"} that fit you — see Explore`), 2600); });
     go("#/rooms");
   };
@@ -2452,6 +2451,28 @@ async function checkIsAdmin(uid) {
   } catch (e) { return false; } // not an admin, or rules blocked it — either way, treat as non-admin
 }
 
+// Short pre-prompt: explains why we're about to ask, then the real browser
+// permission request is made right after the user taps "Got it" (a tap also
+// makes browsers more willing to show the prompt). Shown at most once a day.
+const PUSH_EXPLAINED_KEY = "adroomie_push_explained_at";
+function pushExplainerDue() {
+  try { return Date.now() - Number(localStorage.getItem(PUSH_EXPLAINED_KEY) || 0) > 24 * 3600 * 1000; } catch (e) { return true; }
+}
+function showPushExplainer() {
+  return new Promise((resolve) => {
+    if (document.getElementById("modalOverlay")) { resolve(false); return; } // never replace another popup
+    try { localStorage.setItem(PUSH_EXPLAINED_KEY, String(Date.now())); } catch (e) {}
+    showModal(`
+      <div style="text-align:center;">
+        <div style="font-size:40px;color:var(--accent);"><i class="fa-solid fa-bell"></i></div>
+        <h3 style="margin:8px 0;">Stay in the loop</h3>
+        <p>Next, your browser will ask to send you notifications — for room requests, invitations, when we find you a match, and other updates. Please tap <strong>Allow</strong>.</p>
+        <button class="btn btn-primary" id="pushGotIt" style="width:100%;margin-top:12px;">Got it</button>
+      </div>`);
+    document.getElementById("pushGotIt").onclick = () => { closeModal(); resolve(true); };
+  });
+}
+
 let osReadyResolve;
 const osReady = new Promise((r) => { osReadyResolve = r; }); // resolves with the OneSignal object once init finishes
 async function initOneSignal() {
@@ -2483,8 +2504,12 @@ async function initOneSignal() {
       osReadyResolve(OneSignal);
       // In SDK v16, Notifications.permission is a boolean; the "default" /
       // "granted" / "denied" string lives in permissionNative.
-      const native = OneSignal.Notifications.permissionNative;
-      if (native === "default") await OneSignal.Notifications.requestPermission();
+      let supported = true;
+      try { supported = OneSignal.Notifications.isPushSupported(); } catch (e) {}
+      if (supported && OneSignal.Notifications.permissionNative === "default" && pushExplainerDue()) {
+        const ok = await showPushExplainer();
+        if (ok) await OneSignal.Notifications.requestPermission();
+      }
       await save(await OneSignal.User.PushSubscription.id);
     });
   } catch (e) { console.warn("OneSignal init skipped:", e); }
@@ -2507,7 +2532,13 @@ function renderPushBanner() {
     const optedIn = OneSignal.User.PushSubscription.optedIn;
     if (supported && native === "granted" && optedIn && state.business?.oneSignalPlayerId) { box.innerHTML = ""; return; }
     let text, btn = "";
-    if (!supported) text = "This browser can't receive notifications. Open adRoomie in Chrome (Android) or Safari after adding it to your home screen, not inside WhatsApp or Instagram.";
+    if (!supported) {
+      text = "This browser can't receive notifications (links opened inside WhatsApp or Instagram usually can't). Open adRoomie in Chrome instead.";
+      if (/Android/i.test(navigator.userAgent)) {
+        const intent = `intent://${location.host}${location.pathname}${location.hash}#Intent;scheme=https;package=com.android.chrome;end`;
+        btn = `<a class="btn btn-primary btn-sm" href="${intent}" style="margin-top:8px;display:inline-block;"><i class="fa-brands fa-chrome"></i> Open in Chrome</a>`;
+      }
+    }
     else if (native === "denied") text = "Notifications are blocked for adRoomie. Tap the lock icon next to the address bar, choose Permissions → Notifications → Allow, then reload.";
     else { text = "Turn on notifications so you hear straight away when a business invites you, requests to join, or we find you a match."; btn = `<button class="btn btn-primary btn-sm" id="enablePushBtn" style="margin-top:8px;"><i class="fa-solid fa-bell"></i> Turn on notifications</button>`; }
     const dbg = `supported=${supported} · permission=${native} · subscribed=${optedIn} · saved=${!!state.business?.oneSignalPlayerId}`;
